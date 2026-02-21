@@ -32,7 +32,7 @@ TRANS_FILE = os.path.join(BASE_DIR, 'marriott_transactions.csv')
 class MarriottUltimateSystem:
     def __init__(self, root):
         self.root = root
-        self.root.title("Marriott v230 - Cost Controller Master")
+        self.root.title("Marriott v231 - Admin Search & Align")
         self.root.state('zoomed') 
         self.root.configure(bg=CORE_UI["THEME"]["BG"])
         self.role, self.selected_outlet, self.inventory, self.cart = None, None, [], []
@@ -96,24 +96,43 @@ class MarriottUltimateSystem:
             else: self.setup_order_meta(rcode)
         else: messagebox.showerror("Error", "Invalid Password!")
 
+    # ========================================================
+    # [COST CONTROLLER - UPDATED v231]
+    # ========================================================
     def build_cost_controller_ui(self):
         self.clear_ui(); self.load_data()
         header = tk.Frame(self.root, bg=CORE_UI["THEME"]["HEADER"]); header.pack(fill="x", ipady=5)
         tk.Label(header, text="COST CONTROLLER MASTER PANEL", bg=CORE_UI["THEME"]["HEADER"], fg="white", font=("Arial", 14, "bold")).pack(side="left", padx=20)
         tk.Button(header, text="LOGOUT", bg="#D32F2F", fg="white", command=self.show_login_screen).pack(side="right", padx=20)
 
-        ctrl_f = tk.Frame(self.root, bg=CORE_UI["THEME"]["BG"], pady=10); ctrl_f.pack(fill="x", padx=20)
+        # Control Panel & Search Bar
+        top_f = tk.Frame(self.root, bg=CORE_UI["THEME"]["BG"], pady=10); top_f.pack(fill="x", padx=20)
+        
+        # New Search Bar v231
+        tk.Label(top_f, text="🔍 Quick Search:", bg=CORE_UI["THEME"]["BG"], fg="white").pack(side="left")
+        self.admin_search_var = tk.StringVar()
+        self.admin_search_var.trace_add("write", self.filter_admin_inventory)
+        tk.Entry(top_f, textvariable=self.admin_search_var, font=("Arial", 11), bg="#222", fg="white", width=40).pack(side="left", padx=10)
+
+        ctrl_f = tk.Frame(self.root, bg=CORE_UI["THEME"]["BG"], pady=5); ctrl_f.pack(fill="x", padx=20)
         tk.Button(ctrl_f, text="+ NEW ITEM", bg="#2196F3", fg="white", font=("Arial", 9, "bold"), width=15, command=self.add_new_item_popup).pack(side="left", padx=5)
         tk.Button(ctrl_f, text="🗑️ DELETE ITEM", bg="#f44336", fg="white", font=("Arial", 9, "bold"), width=15, command=self.delete_inventory_item).pack(side="left", padx=5)
-        tk.Button(ctrl_f, text="📥 UPDATE VIA CSV", bg=CORE_UI["THEME"]["ON"], fg="white", font=("Arial", 9, "bold"), width=18, command=self.import_csv).pack(side="left", padx=5)
-        tk.Button(ctrl_f, text="📤 EXPORT MASTER", bg="#607D8B", fg="white", font=("Arial", 9, "bold"), width=18, command=lambda: self.export_to_csv(False)).pack(side="left", padx=5)
-        tk.Button(ctrl_f, text="💜 EXPORT BELOW PAR", bg=CORE_UI["THEME"]["LOW"], fg="white", font=("Arial", 9, "bold"), width=22, command=lambda: self.export_to_csv(True)).pack(side="left", padx=5)
+        tk.Button(ctrl_f, text="📥 UPDATE CSV", bg=CORE_UI["THEME"]["ON"], fg="white", font=("Arial", 9, "bold"), width=15, command=self.import_csv).pack(side="left", padx=5)
+        tk.Button(ctrl_f, text="📤 EXPORT ALL", bg="#607D8B", fg="white", font=("Arial", 9, "bold"), width=15, command=lambda: self.export_to_csv(False)).pack(side="left", padx=5)
+        tk.Button(ctrl_f, text="💜 BELOW PAR", bg=CORE_UI["THEME"]["LOW"], fg="white", font=("Arial", 9, "bold"), width=15, command=lambda: self.export_to_csv(True)).pack(side="left", padx=5)
 
+        # Inventory Table with Alignment v231
         self.admin_tree = ttk.Treeview(self.root, columns=self.all_cols, show='headings')
-        for c in self.all_cols: self.admin_tree.heading(c, text=c.upper()); self.admin_tree.column(c, width=120, anchor="center")
+        for c in self.all_cols: 
+            self.admin_tree.heading(c, text=c.upper())
+            # Alignment: Text columns to Left, Value columns to Center
+            align = "w" if c in ['Product code', 'Catogory', 'Product Description'] else "center"
+            self.admin_tree.column(c, width=150 if 'Description' in c else 100, anchor=align)
+            
         self.admin_tree.tag_configure('low_stock', background=CORE_UI["THEME"]["LOW"], foreground="white")
         self.admin_tree.pack(fill="both", expand=True, padx=20, pady=5)
         
+        # Bottom Area
         tk.Label(self.root, text="APPROVED REQUESTS (FOR PRINTING)", bg=CORE_UI["THEME"]["HEADER"], fg="white", font=("Arial", 10, "bold")).pack(fill="x")
         self.trans_tree = ttk.Treeview(self.root, columns=('ID', 'Date', 'Outlet', 'Status'), show='headings', height=6)
         for c in ('ID', 'Date', 'Outlet', 'Status'): self.trans_tree.heading(c, text=c); self.trans_tree.column(c, anchor="center")
@@ -122,39 +141,14 @@ class MarriottUltimateSystem:
         
         self.refresh_admin_table(); self.load_transactions("CHEF APPROVED", self.trans_tree)
 
-    # --- [UPDATED NEW ITEM POPUP - v230] ---
-    def add_new_item_popup(self):
-        win = tk.Toplevel(self.root); win.title("Add New Article"); win.geometry("450x550"); win.configure(bg=CORE_UI["THEME"]["CARD"])
-        win.grab_set() # Make it modal
-        
-        tk.Label(win, text="ADD NEW INVENTORY ITEM", font=("Arial", 14, "bold"), bg=CORE_UI["THEME"]["CARD"], fg=CORE_UI["THEME"]["ON"]).pack(pady=20)
-        
-        fields = [("Product Code:", "code"), ("Category:", "cat"), ("Description:", "desc"), 
-                  ("Unit Cost:", "cost"), ("Min Par Qty:", "min_par")]
-        entries = {}
-
-        for lbl_txt, key in fields:
-            tk.Label(win, text=lbl_txt, bg=CORE_UI["THEME"]["CARD"], fg="white", font=("Arial", 10)).pack(pady=(10, 0), padx=40, anchor="w")
-            ent = tk.Entry(win, font=("Arial", 12), bg="#000", fg="white", insertbackground="white")
-            ent.pack(pady=5, padx=40, fill="x")
-            entries[key] = ent
-
-        def submit():
-            data = {k: v.get().strip() for k, v in entries.items()}
-            if not data['code'] or not data['desc']:
-                messagebox.showerror("Error", "Product Code and Description are required!", parent=win)
-                return
-            
-            new_row = {c: "0" for c in self.all_cols}
-            new_row.update({
-                'Product code': data['code'], 'Catogory': data['cat'], 'Product Description': data['desc'],
-                'Unit cost': str(self.safe_float(data['cost'])), 'Min Par': str(self.safe_float(data['min_par']))
-            })
-            self.inventory.append(new_row); self.save_to_db(); self.refresh_admin_table(); win.destroy()
-            messagebox.showinfo("Success", "New Item Added Successfully!")
-
-        tk.Button(win, text="ADD TO SYSTEM", bg=CORE_UI["THEME"]["ON"], fg="white", font=("Arial", 11, "bold"), 
-                  height=2, command=submit).pack(pady=30, padx=40, fill="x")
+    def filter_admin_inventory(self, *args):
+        query = self.admin_search_var.get().lower()
+        for i in self.admin_tree.get_children(): self.admin_tree.delete(i)
+        for r in self.inventory:
+            if query in r.get('Product code','').lower() or query in r.get('Product Description','').lower():
+                stock, min_par = self.safe_float(r.get('Stock On Hand', 0)), self.safe_float(r.get('Min Par', 0))
+                tag = 'low_stock' if stock < min_par else ''
+                self.admin_tree.insert('', 'end', values=[r.get(c, "0") for c in self.all_cols], tags=(tag,))
 
     def refresh_admin_table(self):
         for i in self.admin_tree.get_children(): self.admin_tree.delete(i)
@@ -163,21 +157,39 @@ class MarriottUltimateSystem:
             tag = 'low_stock' if stock < min_par else ''
             self.admin_tree.insert('', 'end', values=[r.get(c, "0") for c in self.all_cols], tags=(tag,))
 
+    def add_new_item_popup(self):
+        win = tk.Toplevel(self.root); win.title("Add New Article"); win.geometry("450x550"); win.configure(bg=CORE_UI["THEME"]["CARD"])
+        win.grab_set()
+        tk.Label(win, text="ADD NEW INVENTORY ITEM", font=("Arial", 14, "bold"), bg=CORE_UI["THEME"]["CARD"], fg=CORE_UI["THEME"]["ON"]).pack(pady=20)
+        fields = [("Product Code:", "code"), ("Category:", "cat"), ("Description:", "desc"), ("Unit Cost:", "cost"), ("Min Par Qty:", "min_par")]
+        entries = {}
+        for lbl_txt, key in fields:
+            tk.Label(win, text=lbl_txt, bg=CORE_UI["THEME"]["CARD"], fg="white", font=("Arial", 10)).pack(pady=(10, 0), padx=40, anchor="w")
+            ent = tk.Entry(win, font=("Arial", 12), bg="#000", fg="white", insertbackground="white")
+            ent.pack(pady=5, padx=40, fill="x"); entries[key] = ent
+        def submit():
+            data = {k: v.get().strip() for k, v in entries.items()}
+            if not data['code'] or not data['desc']: messagebox.showerror("Error", "Required fields missing!", parent=win); return
+            new_row = {c: "0" for c in self.all_cols}
+            new_row.update({'Product code': data['code'], 'Catogory': data['cat'], 'Product Description': data['desc'], 'Unit cost': str(self.safe_float(data['cost'])), 'Min Par': str(self.safe_float(data['min_par']))})
+            self.inventory.append(new_row); self.save_to_db(); self.refresh_admin_table(); win.destroy()
+        tk.Button(win, text="ADD TO SYSTEM", bg=CORE_UI["THEME"]["ON"], fg="white", font=("Arial", 11, "bold"), height=2, command=submit).pack(pady=30, padx=40, fill="x")
+
     def delete_inventory_item(self):
         sel = self.admin_tree.selection()
         if not sel: return
-        if messagebox.askyesno("Confirm", "Delete this item permanently?"):
+        if messagebox.askyesno("Confirm", "Delete this item?"):
             idx = self.admin_tree.index(sel[0]); del self.inventory[idx]; self.save_to_db(); self.refresh_admin_table()
 
     def export_to_csv(self, below_par_only):
         data = self.inventory
         if below_par_only: data = [r for r in self.inventory if self.safe_float(r.get('Stock On Hand')) < self.safe_float(r.get('Min Par'))]
-        if not data: messagebox.showinfo("Info", "No data to export!"); return
-        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not data: return
+        path = filedialog.asksaveasfilename(defaultextension=".csv"); 
         if path:
             with open(path, 'w', newline='', encoding='utf-8') as f:
                 dw = csv.DictWriter(f, fieldnames=self.all_cols); dw.writeheader(); dw.writerows(data)
-            messagebox.showinfo("Success", "Exported Successfully!")
+            messagebox.showinfo("Success", "Exported!")
 
     def save_to_db(self):
         with open(DB_FILE, 'w', newline='', encoding='utf-8') as f:
@@ -195,7 +207,7 @@ class MarriottUltimateSystem:
                         r['Total Value'] = f"{s * uc:.2f}"
                         cleaned.append({col: r.get(col, "0") for col in self.all_cols})
                     self.inventory = cleaned; self.save_to_db(); self.refresh_admin_table()
-                messagebox.showinfo("Success", "Inventory Synced!")
+                messagebox.showinfo("Success", "Synced!")
             except Exception as e: messagebox.showerror("Error", str(e))
 
     def load_transactions(self, status, tree):
@@ -230,7 +242,6 @@ class MarriottUltimateSystem:
             can.create_text(700, y, text=f"{i['Total']:,.2f}", anchor="e"); y += 25
         can.create_text(700, y+40, text=f"GRAND TOTAL: LKR {float(req_data['TotalValue']):,.2f}", anchor="e", font=("Arial", 12, "bold"))
 
-    # (Chef, Store, Outlet sections stay the same as v229)
     def build_chef_dashboard(self):
         self.clear_ui(); tk.Label(self.root, text="EXECUTIVE CHEF - APPROVAL PANEL", bg=CORE_UI["THEME"]["HEADER"], fg="white", font=("Arial", 12, "bold")).pack(fill="x", ipady=15)
         main_f = tk.Frame(self.root, bg=CORE_UI["THEME"]["BG"]); main_f.pack(fill="both", expand=True, padx=20, pady=10)
