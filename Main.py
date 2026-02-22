@@ -573,6 +573,7 @@ class MarriottUltimateSystem:
 
         tk.Button(btn_f, text="VIEW & EDIT", bg="#1976D2", fg="white", font=("Arial", 11, "bold"), width=14, command=lambda: self.chef_review(t)).pack(side='left', padx=6)
         tk.Button(btn_f, text="APPROVE SELECTED", bg=CORE_UI["THEME"]["ON"], fg="white", font=("Arial", 11, "bold"), width=16, command=lambda: self.chef_approve_logic(t)).pack(side='left', padx=6)
+        tk.Button(btn_f, text="LOGOUT", bg="#D32F2F", fg="white", font=("Arial", 11, "bold"), width=10, command=self.show_login_screen).pack(side='left', padx=6)
         t.bind('<Double-1>', lambda e: self.chef_review(t))
 
     def chef_approve_logic(self, t):
@@ -723,13 +724,121 @@ class MarriottUltimateSystem:
         tk.Button(btn_frame, text='Approve & Print', bg=CORE_UI['THEME']['ON'], fg='white', command=approve_and_print).pack(side='left', padx=6)
 
     def build_store_dashboard(self):
-        self.clear_ui(); tk.Label(self.root, text="STORE ISSUING", bg="#222", fg="white", font=("Arial", 18)).pack(fill="x", ipady=10)
-        t = ttk.Treeview(self.root, columns=('ID', 'Outlet', 'Total'), show='headings'); t.pack(fill="both", expand=True, padx=20)
+        self.clear_ui()
+        header = tk.Frame(self.root, bg="#222"); header.pack(fill="x")
+        tk.Label(header, text="STORE ISSUING", bg="#222", fg="white", font=("Arial", 18)).pack(side='left', padx=10, ipady=10)
+        btn_f = tk.Frame(header, bg="#222"); btn_f.pack(side='right', padx=10, pady=8)
+        t = ttk.Treeview(self.root, columns=('ID', 'Outlet', 'Total'), show='headings'); t.pack(fill="both", expand=True, padx=20, pady=10)
         for c in ('ID', 'Outlet', 'Total'): t.heading(c, text=c); t.column(c, anchor="center")
-        with open(TRANS_FILE, 'r') as f:
-            for r in csv.DictReader(f):
-                if r['Status'] == 'CHEF APPROVED': t.insert('', 'end', values=(r['ReqID'], r['Outlet'], r['TotalValue']))
-        tk.Button(self.root, text="LOGOUT", bg="#D32F2F", fg="white", command=self.show_login_screen).pack(pady=20)
+        try:
+            with open(TRANS_FILE, 'r', encoding='utf-8') as f:
+                for r in csv.DictReader(f):
+                    if r.get('Status') == 'CHEF APPROVED': t.insert('', 'end', values=(r['ReqID'], r['Outlet'], r['TotalValue']))
+        except Exception:
+            pass
+
+        def view_items(event=None):
+            sel = t.selection()
+            if not sel:
+                messagebox.showwarning("Select", "Please select a request to view.")
+                return
+            rid = t.item(sel[0], 'values')[0]
+            try:
+                req = None
+                with open(TRANS_FILE, 'r', encoding='utf-8') as f:
+                    for r in csv.DictReader(f):
+                        if r.get('ReqID') == rid:
+                            req = r
+                            break
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+                return
+            if not req:
+                messagebox.showerror("Error", "Request not found.")
+                return
+            try:
+                items = ast.literal_eval(req.get('Items', '[]'))
+            except Exception:
+                items = []
+
+            win = tk.Toplevel(self.root)
+            win.title(f"Item Breakdown — {rid}")
+            win.geometry("750x500")
+            win.configure(bg=CORE_UI["THEME"]["BG"])
+            win.transient(self.root); win.grab_set()
+
+            tk.Label(win, text=f"ITEM BREAKDOWN", font=("Arial", 14, "bold"),
+                     bg=CORE_UI["THEME"]["BG"], fg=CORE_UI["THEME"]["HOVER"]).pack(pady=(16, 4))
+            tk.Label(win, text=f"Req ID: {rid}  |  Outlet: {req.get('Outlet','')}  |  Date: {req.get('Date','')}",
+                     font=("Arial", 10), bg=CORE_UI["THEME"]["BG"], fg="white").pack(pady=(0, 10))
+
+            cols = ('Code', 'Description', 'Qty', 'Unit Cost', 'Total')
+            tree = ttk.Treeview(win, columns=cols, show='headings')
+            for col, w, anc in (('Code', 100, 'w'), ('Description', 280, 'w'),
+                                 ('Qty', 80, 'center'), ('Unit Cost', 110, 'e'), ('Total', 110, 'e')):
+                tree.heading(col, text=col); tree.column(col, width=w, anchor=anc)
+            tree.pack(fill='both', expand=True, padx=16, pady=6)
+
+            grand = 0.0
+            for item in items:
+                try: cost = float(item.get('Cost', 0) or 0)
+                except (ValueError, TypeError): cost = 0.0
+                try: qty = float(item.get('Qty', 0) or 0)
+                except (ValueError, TypeError): qty = 0.0
+                try: total = float(item.get('Total', 0) or 0)
+                except (ValueError, TypeError): total = cost * qty
+                grand += total
+                tree.insert('', 'end', values=(
+                    item.get('Code', ''), item.get('Desc', ''),
+                    f"{qty:.2f}", f"{cost:,.2f}", f"{total:,.2f}"))
+
+            tk.Label(win, text=f"GRAND TOTAL:  LKR {grand:,.2f}", font=("Arial", 12, "bold"),
+                     bg=CORE_UI["THEME"]["BG"], fg=CORE_UI["THEME"]["ON"]).pack(pady=8)
+            tk.Button(win, text="CLOSE", bg="#444", fg="white", font=("Arial", 10, "bold"),
+                      width=12, command=win.destroy).pack(pady=(0, 12))
+
+        t.bind('<Double-1>', view_items)
+
+        def issue_selected():
+            sel = t.selection()
+            if not sel:
+                messagebox.showwarning("Select", "Please select a request to issue.")
+                return
+            rid = t.item(sel[0], 'values')[0]
+            if not messagebox.askyesno("Confirm Issue", f"Issue stock for request {rid} and update inventory?"):
+                return
+            try:
+                all_t = []
+                req = None
+                with open(TRANS_FILE, 'r', encoding='utf-8') as f:
+                    rdr = csv.DictReader(f); fn = rdr.fieldnames; all_t = list(rdr)
+                for r in all_t:
+                    if r.get('ReqID') == rid:
+                        r['Status'] = 'ISSUED'; req = r; break
+                if req:
+                    self.load_data()
+                    try:
+                        items = ast.literal_eval(req.get('Items', '[]'))
+                    except Exception:
+                        items = []
+                    for item in items:
+                        for inv_row in self.inventory:
+                            if inv_row.get('Product code') == item.get('Code'):
+                                issued_stock = max(self.safe_float(inv_row.get('Stock On Hand', 0)) - self.safe_float(item.get('Qty', 0)), 0)
+                                inv_row['Stock On Hand'] = f"{issued_stock:.4f}"
+                                inv_row['Total Value'] = f"{issued_stock * self.safe_float(inv_row.get('Unit cost', 0)):.2f}"
+                                break
+                    self.save_to_db()
+                with open(TRANS_FILE, 'w', newline='', encoding='utf-8') as f:
+                    dw = csv.DictWriter(f, fieldnames=fn); dw.writeheader(); dw.writerows(all_t)
+                messagebox.showinfo("Issued", f"Request {rid} marked as ISSUED and stock updated.")
+                self.build_store_dashboard()
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+        tk.Button(btn_f, text="🔍 VIEW ITEMS", bg="#1976D2", fg="white", font=("Arial", 11, "bold"), width=14, command=view_items).pack(side='left', padx=6)
+        tk.Button(btn_f, text="✅ ISSUE SELECTED", bg=CORE_UI["THEME"]["ON"], fg="white", font=("Arial", 11, "bold"), width=18, command=issue_selected).pack(side='left', padx=6)
+        tk.Button(btn_f, text="LOGOUT", bg="#D32F2F", fg="white", font=("Arial", 11, "bold"), width=10, command=self.show_login_screen).pack(side='left', padx=6)
 
 if __name__ == "__main__":
     root = tk.Tk(); app = MarriottUltimateSystem(root); root.mainloop()
