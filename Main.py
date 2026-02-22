@@ -737,6 +737,68 @@ class MarriottUltimateSystem:
         except Exception:
             pass
 
+        def view_items(event=None):
+            sel = t.selection()
+            if not sel:
+                messagebox.showwarning("Select", "Please select a request to view.")
+                return
+            rid = t.item(sel[0], 'values')[0]
+            try:
+                req = None
+                with open(TRANS_FILE, 'r', encoding='utf-8') as f:
+                    for r in csv.DictReader(f):
+                        if r.get('ReqID') == rid:
+                            req = r
+                            break
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+                return
+            if not req:
+                messagebox.showerror("Error", "Request not found.")
+                return
+            try:
+                items = ast.literal_eval(req.get('Items', '[]'))
+            except Exception:
+                items = []
+
+            win = tk.Toplevel(self.root)
+            win.title(f"Item Breakdown — {rid}")
+            win.geometry("750x500")
+            win.configure(bg=CORE_UI["THEME"]["BG"])
+            win.transient(self.root); win.grab_set()
+
+            tk.Label(win, text=f"ITEM BREAKDOWN", font=("Arial", 14, "bold"),
+                     bg=CORE_UI["THEME"]["BG"], fg=CORE_UI["THEME"]["HOVER"]).pack(pady=(16, 4))
+            tk.Label(win, text=f"Req ID: {rid}  |  Outlet: {req.get('Outlet','')}  |  Date: {req.get('Date','')}",
+                     font=("Arial", 10), bg=CORE_UI["THEME"]["BG"], fg="white").pack(pady=(0, 10))
+
+            cols = ('Code', 'Description', 'Qty', 'Unit Cost', 'Total')
+            tree = ttk.Treeview(win, columns=cols, show='headings')
+            for col, w, anc in (('Code', 100, 'w'), ('Description', 280, 'w'),
+                                 ('Qty', 80, 'center'), ('Unit Cost', 110, 'e'), ('Total', 110, 'e')):
+                tree.heading(col, text=col); tree.column(col, width=w, anchor=anc)
+            tree.pack(fill='both', expand=True, padx=16, pady=6)
+
+            grand = 0.0
+            for item in items:
+                try: cost = float(item.get('Cost', 0) or 0)
+                except (ValueError, TypeError): cost = 0.0
+                try: qty = float(item.get('Qty', 0) or 0)
+                except (ValueError, TypeError): qty = 0.0
+                try: total = float(item.get('Total', 0) or 0)
+                except (ValueError, TypeError): total = cost * qty
+                grand += total
+                tree.insert('', 'end', values=(
+                    item.get('Code', ''), item.get('Desc', ''),
+                    f"{qty:.2f}", f"{cost:,.2f}", f"{total:,.2f}"))
+
+            tk.Label(win, text=f"GRAND TOTAL:  LKR {grand:,.2f}", font=("Arial", 12, "bold"),
+                     bg=CORE_UI["THEME"]["BG"], fg=CORE_UI["THEME"]["ON"]).pack(pady=8)
+            tk.Button(win, text="CLOSE", bg="#444", fg="white", font=("Arial", 10, "bold"),
+                      width=12, command=win.destroy).pack(pady=(0, 12))
+
+        t.bind('<Double-1>', view_items)
+
         def issue_selected():
             sel = t.selection()
             if not sel:
@@ -774,6 +836,7 @@ class MarriottUltimateSystem:
             except Exception as e:
                 messagebox.showerror("Error", str(e))
 
+        tk.Button(btn_f, text="🔍 VIEW ITEMS", bg="#1976D2", fg="white", font=("Arial", 11, "bold"), width=14, command=view_items).pack(side='left', padx=6)
         tk.Button(btn_f, text="✅ ISSUE SELECTED", bg=CORE_UI["THEME"]["ON"], fg="white", font=("Arial", 11, "bold"), width=18, command=issue_selected).pack(side='left', padx=6)
         tk.Button(btn_f, text="LOGOUT", bg="#D32F2F", fg="white", font=("Arial", 11, "bold"), width=10, command=self.show_login_screen).pack(side='left', padx=6)
 
