@@ -1,0 +1,2304 @@
+import tkcalendar 
+from tkcalendar import DateEntry
+import tkinter as tk
+from tkinter import messagebox, filedialog, ttk, simpledialog
+import csv, os, datetime, uuid, ast, tempfile
+
+try:
+    import win32api
+    import win32print
+    import win32ui
+    import win32con
+except Exception:
+    win32api = None
+    win32print = None
+    win32ui = None
+    win32con = None
+
+# ========================================================
+# [CORE UI & THEME SETTINGS]
+# ========================================================
+CORE_UI = {
+    "THEME": {
+        "BG": "#0F0F0F", "CARD": "#1A1A1A", "HOVER": "#D32F2F", 
+        "ACCENT": "#FFFFFF", "HEADER": "#252525", "SELECT": "#D32F2F", 
+        "ON": "#43A047", "LOW": "#9370DB", "GRID_BG": "#111111" 
+    }
+}
+
+# Convenience alias used across the UI
+THEME = CORE_UI["THEME"]
+
+PASSWORDS = {
+    "COST": "101", "CHEF": "202", "STORE": "303", 
+    "01. Beira Kitchen": "1", "02. Pastry Kitchen": "2", "03. Butchery": "3",
+    "04. Cold Kitchen": "4", "05. Titos": "5", "06. Banquet Kitchen": "6",
+    "07. The Lounge": "7", "08. Banquet Service": "8", "09. Us Embassy": "9", "10. Ird Service": "10"
+}
+
+OUTLET_NAMES = ["01. Beira Kitchen", "02. Pastry Kitchen", "03. Butchery", "04. Cold Kitchen", "05. Titos",
+                "06. Banquet Kitchen", "07. The Lounge", "08. Banquet Service", "09. Us Embassy", "10. Ird Service"]
+
+BASE_DIR = os.path.expanduser("~")
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(PROJECT_DIR)
+DB_FILE = os.path.join(BASE_DIR, 'marriott_inventory.csv')
+TRANS_FILE = os.path.join(BASE_DIR, 'marriott_transactions.csv')
+
+class MarriottUltimateSystem:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Marriott v238 - Premium UI Restored")
+        self.root.state('zoomed') 
+        self.root.configure(bg=CORE_UI["THEME"]["BG"])
+        self.role, self.selected_outlet, self.inventory, self.cart = None, None, [], []
+        self.all_cols = ['Product code', 'Category', 'Product Description', 'Stock On Hand', 'Unit cost', 'Total Value', 'Min Par', 'Max Par']
+        self.db_file = DB_FILE
+        self.trans_file = TRANS_FILE
+        
+        self.setup_styles()
+        self.init_files()
+        self.show_login_screen()
+
+    def init_files(self):
+        for f in [self.db_file, self.trans_file]:
+            folder = os.path.dirname(f)
+            if folder and not os.path.exists(folder):
+                os.makedirs(folder, exist_ok=True)
+            if not os.path.exists(f):
+                with open(f, 'w', newline='', encoding='utf-8') as file:
+                    csv.writer(file).writerow(self.all_cols if f == self.db_file else ['ReqID', 'Date', 'Outlet', 'Subject', 'TotalValue', 'Status', 'Items'])
+
+    def setup_styles(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("Treeview", background=CORE_UI["THEME"]["GRID_BG"], foreground="white", 
+                        fieldbackground=CORE_UI["THEME"]["GRID_BG"], rowheight=30, font=("Segoe UI", 10))
+        style.configure("Treeview.Heading", background=CORE_UI["THEME"]["HEADER"], foreground="white", font=("Segoe UI", 10, "bold"))
+        style.map("Treeview", background=[('selected', CORE_UI["THEME"]["SELECT"])])
+        # TTK Button style (for ttk.Button widgets)
+        try:
+            style.configure('TButton', background=CORE_UI["THEME"]["CARD"], foreground="white", font=("Segoe UI", 10, "bold"), relief='flat')
+            style.map('TButton', background=[('active', CORE_UI["THEME"]["HOVER"])], foreground=[('active', 'white')])
+        except Exception:
+            pass
+
+        # Global defaults for classic tk.Button widgets to give a unified, professional look
+        try:
+            self.root.option_add('*Button.background', CORE_UI["THEME"]["CARD"])
+            self.root.option_add('*Button.foreground', 'white')
+            self.root.option_add('*Button.activeBackground', CORE_UI["THEME"]["HOVER"])
+            self.root.option_add('*Button.activeForeground', 'white')
+            self.root.option_add('*Button.font', ("Segoe UI", 10, "bold"))
+            self.root.option_add('*Button.relief', 'flat')
+            self.root.option_add('*Button.borderWidth', 0)
+            self.root.option_add('*Button.padx', 8)
+            self.root.option_add('*Button.pady', 6)
+        except Exception:
+            pass
+
+    def safe_float(self, val):
+        try: return float(str(val).replace(',', '').strip())
+        except: return 0.0
+
+    def _inventory_file_candidates(self):
+        return [
+            os.path.join(PROJECT_DIR, 'products.csv'),
+            os.path.join(PROJECT_ROOT, 'products.csv'),
+            os.path.join(BASE_DIR, 'products.csv'),
+            getattr(self, 'db_file', DB_FILE),
+            os.path.join(PROJECT_DIR, 'marriott_inventory.csv'),
+            os.path.join(PROJECT_ROOT, 'marriott_inventory.csv'),
+            os.path.join(PROJECT_ROOT, 'database.csv')
+        ]
+
+    def _stock_report_source_candidates(self):
+        return [
+            os.path.join(PROJECT_DIR, 'products.csv'),
+            os.path.join(PROJECT_ROOT, 'products.csv'),
+            os.path.join(BASE_DIR, 'products.csv'),
+            getattr(self, 'db_file', DB_FILE),
+            os.path.join(PROJECT_DIR, 'marriott_inventory.csv'),
+            os.path.join(PROJECT_ROOT, 'marriott_inventory.csv'),
+            os.path.join(PROJECT_ROOT, 'database.csv')
+        ]
+
+    def _get_full_stock_rows(self):
+        for candidate in self._stock_report_source_candidates():
+            if not candidate or not os.path.exists(candidate):
+                continue
+            try:
+                with open(candidate, 'r', encoding='utf-8-sig') as f:
+                    rows = [self._normalize_inventory_row(r) for r in csv.DictReader(f)]
+                if rows:
+                    return rows
+            except Exception:
+                continue
+        self.load_data()
+        return list(self.inventory)
+
+    def _normalize_inventory_row(self, row):
+        code = (row.get('Product code') or row.get('Code') or row.get('ID') or '').strip()
+        category = (row.get('Category') or row.get('Catogory') or '').strip()
+        desc = (row.get('Product Description') or row.get('Name') or row.get('Desc') or '').strip()
+        stock = self.safe_float(row.get('Stock On Hand', row.get('Quantity', 0)))
+        unit_cost = self.safe_float(row.get('Unit cost', row.get('Price', row.get('Cost', 0))))
+        min_par = self.safe_float(row.get('Min Par', 0))
+        max_par = self.safe_float(row.get('Max Par', 0))
+        total_val = self.safe_float(row.get('Total Value', stock * unit_cost))
+        return {
+            'Product code': code,
+            'Category': category,
+            'Product Description': desc,
+            'Stock On Hand': f"{stock:.2f}" if stock % 1 else str(int(stock)),
+            'Unit cost': f"{unit_cost:.2f}",
+            'Total Value': f"{total_val:.2f}",
+            'Min Par': f"{min_par:.2f}" if min_par % 1 else str(int(min_par)),
+            'Max Par': f"{max_par:.2f}" if max_par % 1 else str(int(max_par))
+        }
+
+    def _load_inventory_from_transactions(self):
+        rows_by_code = {}
+        tfile = getattr(self, 'trans_file', TRANS_FILE)
+        if not os.path.exists(tfile):
+            return []
+        try:
+            with open(tfile, 'r', encoding='utf-8-sig') as f:
+                for tr in csv.DictReader(f):
+                    try:
+                        items = ast.literal_eval(tr.get('Items', '[]'))
+                    except Exception:
+                        items = []
+                    for it in items:
+                        code = str(it.get('Code', '')).strip()
+                        if not code:
+                            continue
+                        desc = str(it.get('Desc', '')).strip()
+                        cost = self.safe_float(it.get('Cost', 0))
+                        if code not in rows_by_code:
+                            rows_by_code[code] = {
+                                'Product code': code,
+                                'Category': '',
+                                'Product Description': desc,
+                                'Stock On Hand': '0',
+                                'Unit cost': f"{cost:.2f}",
+                                'Total Value': "0.00",
+                                'Min Par': '0',
+                                'Max Par': '0'
+                            }
+                        elif desc and not rows_by_code[code].get('Product Description'):
+                            rows_by_code[code]['Product Description'] = desc
+                        elif cost > 0 and self.safe_float(rows_by_code[code].get('Unit cost', 0)) <= 0:
+                            rows_by_code[code]['Unit cost'] = f"{cost:.2f}"
+        except Exception:
+            return []
+        return list(rows_by_code.values())
+
+    def _resolve_req_status(self, req_data):
+        status = str(req_data.get('Status', '') or '').upper()
+        if status:
+            return status
+        if not req_data.get('ReqID'):
+            return ''
+        try:
+            with open(self.trans_file, 'r', encoding='utf-8') as tf:
+                for row in csv.DictReader(tf):
+                    if row.get('ReqID') == req_data.get('ReqID'):
+                        return str(row.get('Status', '') or '').upper()
+        except Exception:
+            pass
+        return ''
+
+    def _print_canvas_report_windows(self, req_data, items, orientation='Portrait'):
+        if os.name != 'nt':
+            return False, "Automatic print is supported only on Windows."
+        if not (win32print and win32ui and win32con):
+            return False, "pywin32 modules are missing. Run: pip install pywin32"
+
+        status = self._resolve_req_status(req_data)
+        is_approved = status == 'CHEF APPROVED'
+
+        try:
+            printer_name = win32print.GetDefaultPrinter()
+            hdc = win32ui.CreateDC()
+            hdc.CreatePrinterDC(printer_name)
+            hdc.StartDoc(f"Stock Request - {req_data.get('ReqID', '')}")
+            hdc.StartPage()
+
+            printable_w = hdc.GetDeviceCaps(win32con.HORZRES)
+            printable_h = hdc.GetDeviceCaps(win32con.VERTRES)
+
+            if orientation == 'Landscape' and printable_h > printable_w:
+                printable_w, printable_h = printable_h, printable_w
+
+            base_w, base_h = (2480, 3508) if orientation == 'Portrait' else (3508, 2480)
+            scale = min(float(printable_w) / float(base_w), float(printable_h) / float(base_h))
+            offset_x = int((printable_w - (base_w * scale)) / 2)
+            offset_y = int((printable_h - (base_h * scale)) / 2)
+
+            def sx(v): return int(offset_x + (v * scale))
+            def sy(v): return int(offset_y + (v * scale))
+
+            def draw_text(x, y, text, pt=12, bold=False, align='left', face='Arial', max_width=None):
+                weight = 700 if bold else 400
+                font = win32ui.CreateFont({'name': face, 'height': -int(pt * 300 / 72 * scale), 'weight': weight})
+                old = hdc.SelectObject(font)
+                txt = str(text)
+                if max_width is not None:
+                    max_px = int(max_width * scale)
+                    if max_px > 0 and hdc.GetTextExtent(txt)[0] > max_px:
+                        ellipsis = "..."
+                        while txt and hdc.GetTextExtent(txt + ellipsis)[0] > max_px:
+                            txt = txt[:-1]
+                        txt = (txt + ellipsis) if txt else ellipsis
+                if align == 'center':
+                    w = hdc.GetTextExtent(txt)[0]
+                    px = sx(x) - (w // 2)
+                elif align == 'right':
+                    w = hdc.GetTextExtent(txt)[0]
+                    px = sx(x) - w
+                else:
+                    px = sx(x)
+                hdc.TextOut(px, sy(y), txt)
+                hdc.SelectObject(old)
+
+            left, right = 120, base_w - 120
+            hdc.Rectangle((sx(left), sy(80), sx(right), sy(420)))
+            header_center_x = (left + right) // 2
+            draw_text(header_center_x, 150, "COURTYARD BY MARRIOTT COLOMBO", pt=28, bold=True, align='center', face='Times New Roman')
+            draw_text(header_center_x, 230, "Inventory Management System", pt=16, align='center')
+            title = "STOCK ISSUE REPORT" if is_approved else "STOCK REQUEST"
+            draw_text((left + right)//2, 310, title, pt=20, bold=True, align='center')
+
+            draw_text(140, 500, f"REQ ID: {req_data.get('ReqID','')}", pt=12, bold=True)
+            draw_text(140, 560, f"DATE  : {req_data.get('Date','')}", pt=12)
+            draw_text(140, 620, f"OUTLET: {req_data.get('Outlet','')}", pt=12)
+            draw_text(140, 680, f"STATUS: {status if status else 'UN-APPROVED STOCK REQUEST'}", pt=12, bold=True)
+
+            row_top = 780
+            hdc.Rectangle((sx(120), sy(row_top), sx(right), sy(row_top + 70)))
+
+            code_x, desc_x = 140, 430
+            qty_x, cost_x, total_x = 1600, 2070, 2360
+            draw_text(code_x, row_top + 18, "Code", pt=12, bold=True)
+            draw_text(desc_x, row_top + 18, "Product Description", pt=12, bold=True)
+            draw_text(qty_x, row_top + 18, "Req Qty", pt=12, bold=True, align='right')
+            draw_text(cost_x, row_top + 18, "Unit Cost", pt=12, bold=True, align='right')
+            draw_text(total_x, row_top + 18, "Total Value", pt=12, bold=True, align='right')
+
+            y = row_top + 110
+            for item in items:
+                qty = self.safe_float(item.get('Qty', item.get('ReqQty', 0)))
+                cost = self.safe_float(item.get('Cost', item.get('Unit cost', item.get('Unit Cost', 0))))
+                total = self.safe_float(item.get('Total', item.get('Total Value', item.get('IssuedTotal', qty * cost))))
+                draw_text(code_x, y, str(item.get('Code', 'N/A'))[:16], pt=11)
+                draw_text(desc_x, y, str(item.get('Desc', '')), pt=11, max_width=1100)
+                draw_text(qty_x, y, f"{qty:.2f}", pt=11, align='right')
+                draw_text(cost_x, y, f"{cost:,.2f}", pt=11, align='right')
+                draw_text(total_x, y, f"{total:,.2f}", pt=11, align='right')
+                y += 60
+
+            try:
+                grand_total = float(req_data.get('TotalValue', 0) or 0)
+            except Exception:
+                grand_total = 0.0
+            draw_text(total_x, y + 80, f"GRAND TOTAL: LKR {grand_total:,.2f}", pt=14, bold=True, align='right')
+
+            sig_y = y + 260
+            hdc.MoveTo((sx(140), sy(sig_y))); hdc.LineTo((sx(920), sy(sig_y)))
+            draw_text(530, sig_y + 25, "Requested By (Outlet Chef)", pt=11, align='center')
+
+            hdc.EndPage()
+            hdc.EndDoc()
+            hdc.DeleteDC()
+            return True, "High-resolution print job sent to default printer."
+        except Exception as e:
+            try:
+                hdc.AbortDoc()
+                hdc.DeleteDC()
+            except Exception:
+                pass
+            return False, f"Print failed: {e}"
+
+    def direct_print(self, *args, **kwargs):
+        status = kwargs.get('status', args[0] if len(args) > 0 else '')
+        items = kwargs.get('items', args[1] if len(args) > 1 else [])
+        date = kwargs.get('date', args[2] if len(args) > 2 else '')
+        req_id = kwargs.get('req_id', args[3] if len(args) > 3 else '')
+
+        pil_image = None
+        try:
+            from PIL.Image import Image as PILImage
+        except Exception:
+            PILImage = None
+
+        for arg in args:
+            if PILImage is not None and isinstance(arg, PILImage):
+                pil_image = arg
+                break
+            if hasattr(arg, 'save') and hasattr(arg, 'mode') and hasattr(arg, 'size'):
+                pil_image = arg
+                break
+
+        if pil_image is None:
+            for value in kwargs.values():
+                if PILImage is not None and isinstance(value, PILImage):
+                    pil_image = value
+                    break
+                if hasattr(value, 'save') and hasattr(value, 'mode') and hasattr(value, 'size'):
+                    pil_image = value
+                    break
+
+        if pil_image is not None:
+            if os.name != 'nt':
+                return False, "Automatic print is supported only on Windows."
+            if not win32api:
+                return False, "win32api module is missing. Run: pip install pywin32"
+            try:
+                fd, temp_path = tempfile.mkstemp(prefix='marriott_print_', suffix='.png')
+                os.close(fd)
+                pil_image.save(temp_path, dpi=(300, 300))
+                printer_name = win32print.GetDefaultPrinter() if win32print else ""
+                if printer_name:
+                    win32api.ShellExecute(0, "printto", temp_path, f'"{printer_name}"', ".", 0)
+                else:
+                    win32api.ShellExecute(0, "print", temp_path, None, ".", 0)
+                return True, "High-resolution print job sent to default printer."
+            except Exception as e:
+                return False, f"Print failed: {e}"
+            finally:
+                try:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                except Exception:
+                    pass
+
+        try:
+            parsed_items = items
+            if isinstance(items, str):
+                parsed_items = ast.literal_eval(items)
+            if not isinstance(parsed_items, list):
+                parsed_items = []
+        except Exception:
+            parsed_items = []
+
+        total_val = 0.0
+        for item in parsed_items:
+            qty = self.safe_float(item.get('Issued', item.get('IssuQty', item.get('Qty', item.get('ReqQty', 0)))))
+            cost = self.safe_float(item.get('Cost', item.get('Unit cost', item.get('Unit Cost', 0))))
+            line_total = self.safe_float(item.get('IssuedTotal', item.get('Total', item.get('Total Value', qty * cost))))
+            if line_total <= 0 and qty > 0 and cost > 0:
+                line_total = qty * cost
+            total_val += line_total
+
+        req_data = {
+            'ReqID': str(req_id or ''),
+            'Date': str(date or ''),
+            'Outlet': str(getattr(self, 'selected_outlet', '') or ''),
+            'Status': str(status or ''),
+            'TotalValue': f"{total_val:.2f}",
+            'Items': str(parsed_items)
+        }
+        return self._print_canvas_report_windows(req_data, parsed_items, 'Portrait')
+
+    def clear_ui(self):
+        for w in self.root.winfo_children(): w.destroy()
+
+    def load_data(self):
+        current_inventory = list(self.inventory)
+        for candidate in self._inventory_file_candidates():
+            if not candidate or not os.path.exists(candidate):
+                continue
+            try:
+                with open(candidate, 'r', encoding='utf-8-sig') as f:
+                    parsed = [self._normalize_inventory_row(r) for r in csv.DictReader(f)]
+                parsed = [r for r in parsed if r.get('Product code') or r.get('Product Description')]
+                if parsed:
+                    self.inventory = parsed
+                    self.db_file = candidate
+                    return
+            except Exception:
+                continue
+
+        recovered = self._load_inventory_from_transactions()
+        if recovered:
+            self.inventory = recovered
+            try:
+                self.save_to_db()
+            except Exception:
+                pass
+            return
+
+        self.inventory = current_inventory
+
+    def save_to_db(self):
+        with open(self.db_file, 'w', newline='', encoding='utf-8') as f:
+            dw = csv.DictWriter(f, fieldnames=self.all_cols); dw.writeheader(); dw.writerows(self.inventory)
+
+    def show_login_screen(self):
+        self.clear_ui()
+        c = tk.Frame(self.root, bg=CORE_UI["THEME"]["BG"]); c.pack(expand=True)
+        tk.Label(c, text="COURTYARD BY MARRIOTT", font=("Times New Roman", 45, "bold"), bg=CORE_UI["THEME"]["BG"], fg="white").pack(pady=40)
+        roles = [("COST CONTROLLER", "COST"), ("EXECUTIVE CHEF", "CHEF"), ("STOREKEEPER", "STORE"), ("OUTLET TEAM", "OUTLET_SEL")]
+        for txt, rcode in roles:
+            tk.Button(c, text=txt, font=("Arial", 12, "bold"), bg=CORE_UI["THEME"]["CARD"], fg="white", width=50, height=2, bd=0, 
+                      command=lambda r=rcode: self.auth_overlay(r) if r != "OUTLET_SEL" else self.build_outlet_selection_ui()).pack(pady=10)
+
+    def auth_overlay(self, rcode):
+        self.ov = tk.Frame(self.root, bg=CORE_UI["THEME"]["BG"]); self.ov.place(x=0, y=0, relwidth=1, relheight=1)
+        center = tk.Frame(self.ov, bg=CORE_UI["THEME"]["CARD"], padx=40, pady=40); center.pack(expand=True)
+        tk.Label(center, text=f"PASSWORD FOR {rcode}", fg="white", bg=CORE_UI["THEME"]["CARD"], font=("Arial", 12, "bold")).pack(pady=10)
+        self.pwd_ent = tk.Entry(center, font=("Arial", 24), show="*", bg="#000", fg=CORE_UI["THEME"]["ON"], justify="center", width=12)
+        self.pwd_ent.pack(pady=15); self.pwd_ent.focus_set()
+        self.pwd_ent.bind("<Return>", lambda e: self.verify_login(rcode))
+        tk.Button(center, text="LOGIN", bg=CORE_UI["THEME"]["ON"], fg="white", width=20, height=2, command=lambda: self.verify_login(rcode)).pack(pady=10)
+        tk.Button(center, text="CANCEL", bg="#444", fg="white", width=10, command=self.ov.destroy).pack()
+
+    def verify_login(self, rcode):
+        pwd = self.pwd_ent.get()
+        # record role for conditional behaviors (e.g., chef compact print)
+        try:
+            self.role = rcode
+        except Exception:
+            pass
+        if PASSWORDS.get(rcode) == pwd:
+            self.ov.destroy()
+            if rcode == "COST": self.build_cost_controller_ui()
+            elif rcode == "CHEF": self.build_chef_dashboard()
+            elif rcode == "STORE": self.build_store_dashboard()
+            else: self.setup_order_meta(rcode)
+        else:
+            messagebox.showerror("Error", "Invalid Password!")
+
+    # ========================================================
+    # [ADMIN PANEL]
+    # ========================================================
+    def build_cost_controller_ui(self):
+        self.clear_ui(); self.load_data()
+        header = tk.Frame(self.root, bg=CORE_UI["THEME"]["HEADER"]); header.pack(fill="x", ipady=5)
+        tk.Label(header, text="COST CONTROLLER MASTER PANEL", bg=CORE_UI["THEME"]["HEADER"], fg="white", font=("Arial", 14, "bold")).pack(side="left", padx=20)
+        tk.Button(header, text="LOGOUT", bg="#D32F2F", fg="white", command=self.show_login_screen).pack(side="right", padx=20)
+        
+        top_f = tk.Frame(self.root, bg=CORE_UI["THEME"]["BG"], pady=10); top_f.pack(fill="x", padx=20)
+        self.admin_search_var = tk.StringVar(); self.admin_search_var.trace_add("write", self.filter_admin_inventory)
+        tk.Label(top_f, text="🔍 Search:", bg=CORE_UI["THEME"]["BG"], fg="white").pack(side="left")
+        tk.Entry(top_f, textvariable=self.admin_search_var, font=("Arial", 11), bg="#222", fg="white", width=40).pack(side="left", padx=10)
+        
+        ctrl_f = tk.Frame(self.root, bg=CORE_UI["THEME"]["BG"], pady=5); ctrl_f.pack(fill="x", padx=20)
+        tk.Button(ctrl_f, text="+ NEW ITEM", bg="#2196F3", fg="white", font=("Arial", 9, "bold"), width=15, command=self.add_new_item_popup).pack(side="left", padx=5)
+        tk.Button(ctrl_f, text="🗑️ DELETE", bg="#f44336", fg="white", font=("Arial", 9, "bold"), width=15, command=self.delete_inventory_item).pack(side="left", padx=5)
+        tk.Button(ctrl_f, text="📥 UPDATE CSV", bg=CORE_UI["THEME"]["ON"], fg="white", font=("Arial", 9, "bold"), width=20, command=self.import_csv).pack(side="left", padx=5)
+        tk.Button(ctrl_f, text="📤 EXPORT ALL", bg="#607D8B", fg="white", font=("Arial", 9, "bold"), width=15, command=lambda: self.export_to_csv(False)).pack(side="left", padx=5)
+        tk.Button(ctrl_f, text="💜 BELOW PAR", bg=CORE_UI["THEME"]["LOW"], fg="white", font=("Arial", 9, "bold"), width=20, command=lambda: self.export_to_csv(True)).pack(side="left", padx=5)
+        tk.Button(ctrl_f, text="📊 STOCK REPORT", bg="#455A64", fg="white", font=("Arial", 9, "bold"), width=18, command=self.show_stock_report).pack(side="left", padx=5)
+        tk.Button(ctrl_f, text="📥 EXPORT TO EXCEL", bg="#1976D2", fg="white", font=("Arial", 9, "bold"), width=20, command=self.export_stock_on_hand_to_excel).pack(side="left", padx=5)
+        
+        self.admin_tree = ttk.Treeview(self.root, columns=self.all_cols, show='headings')
+        for c in self.all_cols: 
+            self.admin_tree.heading(c, text=c.upper())
+            align = "w" if c in ['Product code', 'Category', 'Product Description'] else "center"
+            self.admin_tree.column(c, width=150 if 'Description' in c else 100, anchor=align)
+        
+        self.admin_tree.tag_configure('low_stock', background=CORE_UI["THEME"]["LOW"], foreground="white")
+        self.admin_tree.pack(fill="both", expand=True, padx=20, pady=5)
+        
+        self.trans_tree = ttk.Treeview(self.root, columns=('ID', 'Date', 'Outlet', 'Status'), show='headings', height=6)
+        for c in ('ID', 'Date', 'Outlet', 'Status'): self.trans_tree.heading(c, text=c); self.trans_tree.column(c, anchor="center")
+        self.trans_tree.pack(fill="x", padx=20, pady=5)
+        tk.Button(self.root, text="🖨️ PRINT SELECTED (A4)", bg="#FF9800", fg="black", font=("Arial", 10, "bold"), height=2, command=self.print_selected_trans).pack(pady=5)
+        
+        self.refresh_admin_table(); self.load_transactions("CHEF APPROVED", self.trans_tree)
+
+    # --- RE-DESIGNED ADD NEW ITEM POPUP ---
+    def add_new_item_popup(self):
+        win = tk.Toplevel(self.root)
+        win.title("ADD NEW INVENTORY ITEM")
+        win.geometry("500x600")
+        win.configure(bg=CORE_UI["THEME"]["BG"])
+        win.grab_set() # Focus on this window
+        
+        tk.Label(win, text="ITEM MASTER ENTRY", font=("Arial", 14, "bold"), bg=CORE_UI["THEME"]["BG"], fg=CORE_UI["THEME"]["HOVER"]).pack(pady=20)
+        
+        fields = [
+            ("Product Code:", "code"), ("Category:", "cat"), 
+            ("Description:", "desc"), ("Unit Cost (LKR):", "cost"), 
+            ("Min Par Level:", "min"), ("Max Par Level:", "max")
+        ]
+        
+        ents = {}
+        for label, key in fields:
+            f = tk.Frame(win, bg=CORE_UI["THEME"]["BG"])
+            f.pack(fill="x", padx=40, pady=5)
+            tk.Label(f, text=label, bg=CORE_UI["THEME"]["BG"], fg="white", font=("Arial", 10)).pack(side="left")
+            e = tk.Entry(f, font=("Arial", 11), bg="#222", fg="white", insertbackground="white", bd=1)
+            e.pack(side="right", expand=True, fill="x", padx=(10, 0))
+            ents[key] = e
+
+        def save_item():
+            if not ents['code'].get() or not ents['desc'].get():
+                messagebox.showwarning("Warning", "Code and Description are mandatory!")
+                return
+            
+            new_r = {c: "0" for c in self.all_cols}
+            new_r.update({
+                'Product code': ents['code'].get().strip(),
+                'Category': ents['cat'].get().strip(),
+                'Product Description': ents['desc'].get().strip(),
+                'Unit cost': ents['cost'].get().strip() or "0",
+                'Min Par': ents['min'].get().strip() or "0",
+                'Max Par': ents['max'].get().strip() or "0",
+                'Stock On Hand': "0",
+                'Total Value': "0.00"
+            })
+            self.inventory.append(new_r)
+            self.save_to_db()
+            self.refresh_admin_table()
+            win.destroy()
+            messagebox.showinfo("Success", "New Item Added to Inventory!")
+
+        btn_f = tk.Frame(win, bg=CORE_UI["THEME"]["BG"])
+        btn_f.pack(pady=30)
+        tk.Button(btn_f, text="SAVE ITEM", bg=CORE_UI["THEME"]["ON"], fg="white", font=("Arial", 10, "bold"), width=15, height=2, command=save_item).pack(side="left", padx=10)
+        tk.Button(btn_f, text="CANCEL", bg="#444", fg="white", font=("Arial", 10, "bold"), width=10, height=2, command=win.destroy).pack(side="left")
+
+    def show_transaction_print(self, req_data, on_close=None):
+        try:
+            items = ast.literal_eval(req_data.get('Items', '[]'))
+        except Exception:
+            items = []
+
+        pv = tk.Toplevel(self.root)
+        pv.title("Print Report Preview")
+        pv.state('zoomed')
+        pv.configure(bg="#333")
+        # Ensure preview window appears above other windows and receives focus
+        try:
+            pv.transient(self.root)
+            pv.attributes('-topmost', True)
+            pv.lift()
+            pv.grab_set()
+            pv.focus_force()
+        except Exception:
+            pass
+
+        # control bar with orientation and print actions
+        ctrl_bar = tk.Frame(pv, bg="#222", pady=10); ctrl_bar.pack(fill="x")
+        def scroll_top():
+            try: canvas.yview_moveto(0)
+            except: pass
+        def scroll_bottom():
+            try: canvas.yview_moveto(1)
+            except: pass
+
+        def do_print_action():
+            status = self._resolve_req_status(req_data) or 'UN-APPROVED STOCK REQUEST'
+            ok, msg = self.direct_print(status, items, req_data.get('Date', ''), req_data.get('ReqID', ''))
+            if ok:
+                messagebox.showinfo("Print", msg)
+            else:
+                messagebox.showerror("Print", msg)
+            try:
+                pv.destroy()
+            except:
+                pass
+            # call optional on_close callback (e.g., to return to Chef dashboard)
+            try:
+                if callable(on_close):
+                    on_close()
+            except Exception:
+                pass
+
+        orient_var = tk.StringVar(value='Portrait')
+        tk.Label(ctrl_bar, text="Orientation:", bg="#222", fg="white").pack(side='left', padx=(8,4))
+        tk.Radiobutton(ctrl_bar, text="Portrait", variable=orient_var, value='Portrait', bg="#222", fg="white", selectcolor="#222").pack(side='left')
+        tk.Radiobutton(ctrl_bar, text="Landscape", variable=orient_var, value='Landscape', bg="#222", fg="white", selectcolor="#222").pack(side='left')
+        tk.Button(ctrl_bar, text="⬆︎ TOP", bg="#555", fg="white", width=8, command=scroll_top).pack(side='left', padx=6)
+        tk.Button(ctrl_bar, text="⬇︎ BOTTOM", bg="#555", fg="white", width=10, command=scroll_bottom).pack(side='left')
+        tk.Button(ctrl_bar, text="🖨️ PRINT (A4)", bg="#4CAF50", fg="white", font=("Arial", 12, "bold"), width=20, command=do_print_action).pack(side='right', padx=8)
+
+        container = tk.Frame(pv, bg="#333"); container.pack(fill="both", expand=True, padx=50, pady=20)
+        canvas = tk.Canvas(container, bg="white", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg="white")
+        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        # create window without forcing a fixed width so we can adjust to fit-to-screen later
+        canvas_window = canvas.create_window((0,0), window=scrollable_frame, anchor='nw')
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        def render_report(orientation='Portrait'):
+            for w in scrollable_frame.winfo_children(): w.destroy()
+            # A4 high-resolution logical size at ~300 DPI
+            if orientation == 'Portrait':
+                page_w, page_h = 2480, 3508
+            else:
+                page_w, page_h = 3508, 2480
+
+            right = page_w - 120
+            
+            report_canvas = tk.Canvas(scrollable_frame, bg="white", width=page_w, height=page_h, highlightthickness=0)
+            report_canvas.pack(pady=20)
+            
+            # Add logo/header section
+            report_canvas.create_rectangle(120, 80, right, 420, fill="#f0f0f0", outline="#333", width=5)
+            status = self._resolve_req_status(req_data)
+            is_approved = status.upper() == 'CHEF APPROVED'
+            report_title = "STOCK ISSUE REPORT" if is_approved else "STOCK REQUEST"
+            # compact chef print: when chef approved and current user is CHEF, show minimal columns
+            chef_compact = is_approved and (self.role == 'CHEF')
+            # store compact print: when storekeeper prints a BOOKED transaction, show issued qty/value
+            store_compact = (self.role == 'STORE') and (str(status).upper() == 'BOOKED')
+            outlet_request_view = (not is_approved) and (self.role not in ('CHEF', 'STORE', 'COST'))
+            header_center_x = (120 + right) // 2
+            if outlet_request_view:
+                report_canvas.create_text(header_center_x, 150, text="COURTYARD BY MARRIOTT COLOMBO", anchor="center", font=("Times New Roman", 48, "bold"))
+                report_canvas.create_text(header_center_x, 230, text="Inventory Management System", anchor="center", font=("Arial", 26))
+                report_canvas.create_text(header_center_x, 310, text="Stock Request", anchor="center", font=("Arial", 34, "bold"))
+            else:
+                report_canvas.create_text(header_center_x, 150, text="COURTYARD BY MARRIOTT COLOMBO", anchor="center", font=("Times New Roman", 48, "bold"))
+                report_canvas.create_text(header_center_x, 230, text="Inventory Management System", anchor="center", font=("Arial", 26))
+                report_canvas.create_text(header_center_x, 310, text=report_title, anchor="center", font=("Arial", 34, "bold"))
+            report_canvas.create_line(120, 420, right, 420, width=4)
+            
+            report_canvas.create_text(140, 500, text=f"REQ ID: {req_data.get('ReqID','')}", anchor="w", font=("Arial", 20, "bold"))
+            report_canvas.create_text(140, 560, text=f"DATE  : {req_data.get('Date','')}", anchor="w", font=("Arial", 20))
+            report_canvas.create_text(140, 620, text=f"OUTLET: {req_data.get('Outlet','')}", anchor="w", font=("Arial", 20))
+            report_canvas.create_text(140, 680, text=f"STATUS: {status if status else 'UN-APPROVED STOCK REQUEST'}", anchor="w", font=("Arial", 20, "bold"))
+            y = 780
+            # Compute totals and render header row with adjusted column positions
+            report_canvas.create_rectangle(120, y, right, y+70, fill="#EEEEEE", outline="black", width=2)
+            # set fixed column x positions (relative to page width) to avoid overlap
+            code_x = 140
+            desc_x = 430
+            qty_x = 0
+            total_x = 0
+            req_qty_x = 0
+            issu_qty_x = 0
+            unit_cost_x = 0
+            issued_val_x = 0
+            if outlet_request_view:
+                code_x = 160
+                desc_x = 360
+                req_qty_x = 1600
+                unit_cost_x = 2080
+                total_x = 2360
+                headers = [
+                    ("Code", code_x),
+                    ("Product Description", desc_x),
+                    ("Req Qty", req_qty_x),
+                    ("Unit Cost", unit_cost_x),
+                    ("Total Value", total_x)
+                ]
+            elif chef_compact:
+                req_qty_x = 1780
+                unit_cost_x = 2070
+                total_x = 2360
+                headers = [
+                    ("Code", code_x),
+                    ("Product Description", desc_x),
+                    ("Req Qty", req_qty_x),
+                    ("Unit Cost", unit_cost_x),
+                    ("Total Value", total_x)
+                ]
+            elif store_compact:
+                # store view: show requested qty, issued qty and issued value
+                req_qty_x = 1720
+                issu_qty_x = 1950
+                issued_val_x = 2360
+                headers = [("Code", code_x), ("Product Description", desc_x), ("Req Qty", req_qty_x), ("Issu Qty", issu_qty_x), ("Issued Value", issued_val_x)]
+            elif is_approved:
+                req_qty_x = 1720
+                issu_qty_x = 1900
+                unit_cost_x = 2100
+                total_x = 2360
+                headers = [("Code", code_x), ("Product Description", desc_x), ("Req Qty", req_qty_x), ("Issu Qty", issu_qty_x), ("Unit Cost", unit_cost_x), ("Total (LKR)", total_x)]
+            else:
+                req_qty_x = 1780
+                unit_cost_x = 2070
+                total_x = 2360
+                headers = [("Code", code_x), ("Product Description", desc_x), ("Req Qty", req_qty_x), ("Unit Cost", unit_cost_x), ("Total Value", total_x)]
+
+            for text, x in headers:
+                if (outlet_request_view or chef_compact) and text.strip().lower() in ('req qty', 'unit cost', 'total value'):
+                    anchor = 'e'
+                elif text.strip().lower() in ('req qty', 'qty', 'issu qty', 'issu qty', 'req qty'):
+                    anchor = 'center'
+                else:
+                    anchor = 'e' if x > (page_w-150) else 'w'
+                report_canvas.create_text(x, y+35, text=text, anchor=anchor, font=("Arial", 18, "bold"))
+            y += 110
+
+            for i in items:
+                report_canvas.create_text(code_x, y, text=str(i.get('Code', 'N/A')), anchor="w", font=("Arial", 16))
+                # allow longer description but truncate visually to avoid overflow
+                report_canvas.create_text(desc_x, y, text=str(i.get('Desc', '')), anchor="w", width=1100, font=("Arial", 16))
+
+                # resolve numeric values robustly (support different key names)
+                qty = self.safe_float(i.get('Qty', i.get('ReqQty', 0)))
+                cost = self.safe_float(i.get('Cost', i.get('Unit cost', i.get('Unit Cost', 0))))
+                line_total = self.safe_float(i.get('Total', i.get('Total Value', i.get('IssuedTotal', qty * cost))))
+
+                if outlet_request_view:
+                    report_canvas.create_text(req_qty_x, y, text=f"{qty:.2f}", anchor="e", font=("Arial", 16))
+                    report_canvas.create_text(unit_cost_x, y, text=f"{cost:,.2f}", anchor="e", font=("Arial", 16))
+                    display_total = line_total if line_total else qty * cost
+                    report_canvas.create_text(total_x, y, text=f"{display_total:,.2f}", anchor="e", font=("Arial", 16))
+                elif chef_compact:
+                    report_canvas.create_text(req_qty_x, y, text=f"{qty:.2f}", anchor="e", font=("Arial", 16))
+                    report_canvas.create_text(unit_cost_x, y, text=f"{cost:,.2f}", anchor="e", font=("Arial", 16))
+                    display_total = line_total if line_total else qty * cost
+                    report_canvas.create_text(total_x, y, text=f"{display_total:,.2f}", anchor="e", font=("Arial", 16))
+                elif store_compact:
+                    req_qty = self.safe_float(i.get('ReqQty', qty))
+                    issu_qty = self.safe_float(i.get('IssuQty', i.get('Issued', i.get('Issu Qty', 0))))
+                    issued_val = self.safe_float(i.get('IssuedTotal', i.get('Total', line_total)))
+                    report_canvas.create_text(req_qty_x, y, text=f"{req_qty:.2f}", anchor="center", font=("Arial", 16))
+                    report_canvas.create_text(issu_qty_x, y, text=f"{issu_qty:.2f}", anchor="center", font=("Arial", 16))
+                    report_canvas.create_text(issued_val_x, y, text=f"{issued_val:,.2f}", anchor="e", font=("Arial", 16))
+                elif is_approved:
+                    req_qty = self.safe_float(i.get('ReqQty', qty))
+                    issu_qty = self.safe_float(i.get('IssuQty', i.get('Issu Qty', 0)))
+                    report_canvas.create_text(req_qty_x, y, text=f"{req_qty:.2f}", anchor="center", font=("Arial", 16))
+                    report_canvas.create_text(issu_qty_x, y, text=f"{issu_qty:.2f}", anchor="center", font=("Arial", 16))
+                    report_canvas.create_text(unit_cost_x, y, text=f"{cost:,.2f}", anchor="e", font=("Arial", 16))
+                    report_canvas.create_text(total_x, y, text=f"{line_total:,.2f}", anchor="e", font=("Arial", 16))
+                else:
+                    report_canvas.create_text(req_qty_x, y, text=f"{qty:.2f}", anchor="center", font=("Arial", 16))
+                    report_canvas.create_text(unit_cost_x, y, text=f"{cost:,.2f}", anchor="e", font=("Arial", 16))
+                    display_total = line_total if line_total else qty * cost
+                    report_canvas.create_text(total_x, y, text=f"{display_total:,.2f}", anchor="e", font=("Arial", 16))
+
+                y += 60
+                if y > page_h - 100:
+                    report_canvas.config(height=y+200)
+            try:
+                report_canvas.create_text(total_x, y+80, text=f"GRAND TOTAL: LKR {float(req_data.get('TotalValue',0)):,.2f}", anchor="e", font=("Arial", 24, "bold"))
+            except:
+                report_canvas.create_text(total_x, y+80, text=f"GRAND TOTAL: LKR 0.00", anchor="e", font=("Arial", 24, "bold"))
+            sig_y = y + 260
+            report_canvas.config(height=sig_y+80)
+            report_canvas.create_line(140, sig_y, 920, sig_y); report_canvas.create_text(530, sig_y+25, text="Requested By (Outlet Chef)", font=("Arial", 16))
+            # --- Fit-to-screen scaling: automatically scale report to available preview width ---
+            try:
+                pv.update_idletasks()
+                # available width inside container (leave some padding)
+                avail_w = max(200, container.winfo_width() - 80)
+                # compute scale factor to fit page width into available width
+                scale = min(1.0, float(avail_w) / float(page_w)) if page_w > 0 else 1.0
+                if scale < 1.0:
+                    # scale all items on the report canvas
+                    report_canvas.scale("all", 0, 0, scale, scale)
+                    # update canvas size to scaled dimensions
+                    new_w = int(page_w * scale)
+                    new_h = int((sig_y+80) * scale)
+                    report_canvas.config(width=new_w, height=new_h)
+                # ensure the outer canvas window reserves the correct width
+                try:
+                    canvas.itemconfig(canvas_window, width=report_canvas.cget('width'))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+
+        # initial render (catch errors and ensure window stays on top briefly)
+        try:
+            render_report(orient_var.get())
+            orient_var.trace_add('write', lambda *a: render_report(orient_var.get()))
+        except Exception as e:
+            try:
+                messagebox.showerror('Render Error', f'Failed to render print preview: {e}')
+            except:
+                pass
+        try:
+            pv.attributes('-topmost', False)
+        except Exception:
+            pass
+
+    def import_csv(self):
+        p = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
+        if p:
+            try:
+                with open(p, 'r', encoding='utf-8-sig') as f:
+                    raw = list(csv.DictReader(f)); cleaned = []
+                    for row in raw:
+                        r = {k.strip(): v.strip() for k, v in row.items()}
+                        s, uc = self.safe_float(r.get('Stock On Hand',0)), self.safe_float(r.get('Unit cost',0))
+                        r['Total Value'] = f"{s * uc:.2f}"
+                        cleaned.append({col: r.get(col, "0") for col in self.all_cols})
+                    self.inventory = cleaned; self.save_to_db(); self.refresh_admin_table()
+                messagebox.showinfo("Success", "Import Complete!")
+            except Exception as e: messagebox.showerror("Error", str(e))
+
+    def export_to_csv(self, below_par_only):
+        data = self.inventory
+        if below_par_only: data = [r for r in self.inventory if self.safe_float(r.get('Stock On Hand', 0)) < self.safe_float(r.get('Min Par', 0))]
+        if not data: messagebox.showinfo("Info", "No data."); return
+        path = filedialog.asksaveasfilename(defaultextension=".csv")
+        if path:
+            with open(path, 'w', newline='', encoding='utf-8') as f:
+                dw = csv.DictWriter(f, fieldnames=self.all_cols); dw.writeheader(); dw.writerows(data)
+    
+    def show_stock_report(self):
+        report_rows = self._get_full_stock_rows()
+        win = tk.Toplevel(self.root)
+        win.title("Stock Report")
+        win.geometry("1100x650")
+        win.configure(bg=CORE_UI["THEME"]["BG"])
+        
+        tk.Label(win, text="CURRENT STOCK REPORT", bg=CORE_UI["THEME"]["BG"], fg="white", font=("Arial", 14, "bold")).pack(pady=10)
+        
+        cols = ("Product Code", "Product Description", "Stock on Hand", "Unit Cost", "Item Value")
+        tree = ttk.Treeview(win, columns=cols, show='headings')
+        for col, width, anchor in (
+            ("Product Code", 160, 'w'),
+            ("Product Description", 420, 'w'),
+            ("Stock on Hand", 180, 'e'),
+            ("Unit Cost", 140, 'e'),
+            ("Item Value", 160, 'e'),
+        ):
+            tree.heading(col, text=col)
+            tree.column(col, width=width, anchor=anchor)
+        tree.pack(fill='both', expand=True, padx=14, pady=10)
+        
+        grand_total = 0.0
+        for row in report_rows:
+            qty = self.safe_float(row.get('Stock On Hand', 0))
+            unit_cost = self.safe_float(row.get('Unit cost', 0))
+            item_value = qty * unit_cost
+            grand_total += item_value
+            tree.insert('', 'end', values=(
+                row.get('Product code', ''),
+                row.get('Product Description', ''),
+                f"{qty:.2f}",
+                f"{unit_cost:,.2f}",
+                f"{item_value:,.2f}"
+            ))
+        
+        tk.Label(win, text=f"GRAND TOTAL: LKR {grand_total:,.2f}", bg=CORE_UI["THEME"]["BG"], fg=CORE_UI["THEME"]["ON"], font=("Arial", 13, "bold")).pack(anchor='e', padx=18, pady=(0, 12))
+    
+    def export_stock_on_hand_to_excel(self):
+        report_rows = self._get_full_stock_rows()
+        save_path = filedialog.asksaveasfilename(
+            title="Export Stock on Hand",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile="stock_on_hand_report.csv"
+        )
+        if not save_path:
+            return
+        
+        headers = [
+            "Product Code",
+            "Product Description",
+            "Stock on Hand",
+            "Unit Cost",
+            "Item Value"
+        ]
+        grand_total = 0.0
+        try:
+            with open(save_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                for row in report_rows:
+                    qty = self.safe_float(row.get('Stock On Hand', 0))
+                    unit_cost = self.safe_float(row.get('Unit cost', 0))
+                    item_value = qty * unit_cost
+                    grand_total += item_value
+                    writer.writerow([
+                        row.get('Product code', ''),
+                        row.get('Product Description', ''),
+                        f"{qty:.2f}",
+                        f"{unit_cost:.2f}",
+                        f"{item_value:.2f}"
+                    ])
+                
+                writer.writerow([])
+                writer.writerow(["GRAND TOTAL", "", "", "", f"{grand_total:.2f}"])
+            
+            messagebox.showinfo("Export Complete", f"Stock report exported successfully.\n\n{save_path}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Unable to export stock report:\n{e}")
+
+    def filter_admin_inventory(self, *args):
+        q = self.admin_search_var.get().lower(); self.refresh_admin_table(q)
+
+    def refresh_admin_table(self, query=""):
+        for i in self.admin_tree.get_children(): self.admin_tree.delete(i)
+        for r in self.inventory:
+            if query in r.get('Product code','').lower() or query in r.get('Product Description','').lower():
+                stock, min_p = self.safe_float(r.get('Stock On Hand', 0)), self.safe_float(r.get('Min Par', 0))
+                tag = 'low_stock' if stock < min_p else ''
+                self.admin_tree.insert('', 'end', values=[r.get(c, "0") for c in self.all_cols], tags=(tag,))
+
+    def build_outlet_selection_ui(self):
+        self.clear_ui()
+        tk.Label(self.root, text="CHOOSE YOUR KITCHEN", font=("Arial", 28, "bold"), bg=CORE_UI["THEME"]["BG"], fg="white").pack(pady=40)
+        grid = tk.Frame(self.root, bg=CORE_UI["THEME"]["BG"]); grid.pack(expand=True)
+        for i, name in enumerate(OUTLET_NAMES):
+            row, col = i // 2, i % 2
+            def make_btn(n=name, r=row, c=col):
+                btn = tk.Button(grid, text=n.upper(), font=("Arial", 11, "bold"), bg=CORE_UI["THEME"]["CARD"], fg="white", width=35, height=3, bd=0, relief="flat", activebackground=CORE_UI["THEME"]["HOVER"], command=lambda n=n: self.auth_overlay(n))
+                btn.grid(row=r, column=c, padx=15, pady=15)
+                def on_enter(e, b=btn):
+                    try:
+                        b.config(bg=CORE_UI["THEME"]["HOVER"], fg="white", bd=2, relief="raised")
+                    except: pass
+                def on_leave(e, b=btn):
+                    try:
+                        b.config(bg=CORE_UI["THEME"]["CARD"], fg="white", bd=0, relief="flat")
+                    except: pass
+                btn.bind("<Enter>", on_enter)
+                btn.bind("<Leave>", on_leave)
+            make_btn()
+
+    def setup_order_meta(self, name):
+        self.selected_outlet = name
+        self.req_id = f"M-REQ-{datetime.datetime.now().strftime('%y%m%d-%H%M%S')}"
+        self.clear_ui()
+        c = tk.Frame(self.root, bg=CORE_UI["THEME"]["CARD"], padx=60, pady=40); c.pack(expand=True)
+        tk.Label(c, text=f"OUTLET: {self.selected_outlet}", font=("Arial", 14, "bold"), bg=CORE_UI["THEME"]["CARD"], fg="white").pack(pady=(0,8))
+        tk.Label(c, text=f"REQUEST ID: {self.req_id}", font=("Arial", 12), bg=CORE_UI["THEME"]["CARD"], fg=CORE_UI["THEME"]["ON"]).pack(pady=(0,12))
+        self.date_sel = DateEntry(c, width=45, background='black', foreground='white', borderwidth=2, date_pattern='yyyy-mm-dd', mindate=datetime.date.today(), state='readonly')
+        self.date_sel.pack(pady=10)
+        fsub = tk.Frame(c, bg=CORE_UI["THEME"]["CARD"]); fsub.pack(pady=10)
+        tk.Label(fsub, text="Subject:", bg=CORE_UI["THEME"]["CARD"], fg="white").pack(side='left')
+        self.sub_ent = tk.Entry(fsub, font=("Arial", 12), width=48, bg="#000", fg="white")
+        self.sub_ent.insert(0, "Daily Order")
+        self.sub_ent.pack(side='left', padx=(10,0))
+        tk.Button(c, text="OPEN INVENTORY", bg=CORE_UI["THEME"]["ON"], fg="white", font=("Arial", 11, "bold"), width=35, height=2, command=self.validate_order_meta).pack(pady=30)
+
+    def validate_order_meta(self):
+        subj = self.sub_ent.get().strip() if hasattr(self, 'sub_ent') else ''
+        try:
+            sel_date = self.date_sel.get_date()
+        except Exception:
+            try:
+                sel_date = datetime.datetime.strptime(self.date_sel.get(), "%Y-%m-%d").date()
+            except Exception:
+                sel_date = None
+        if not subj:
+            messagebox.showwarning("Warning", "Please enter a subject before continuing.")
+            return
+        if sel_date is None:
+            messagebox.showwarning("Warning", "Please select a valid date.")
+            return
+        if sel_date < datetime.date.today():
+            messagebox.showwarning("Warning", "Back-dating is not allowed. Please choose today or a future date.")
+            return
+        self.req_date = sel_date.strftime('%Y-%m-%d')
+        self.order_subject = subj
+        self.build_outlet_grid()
+
+    def build_outlet_grid(self):
+        self.req_date, self.order_subject = self.date_sel.get(), self.sub_ent.get()
+        self.clear_ui(); self.load_data(); self.cart = []
+        header = tk.Frame(self.root, bg=CORE_UI["THEME"]["HEADER"], pady=10); header.pack(fill="x")
+        tk.Label(header, text=f"REQ: {self.req_id} | OUTLET: {self.selected_outlet}", fg="white", bg=CORE_UI["THEME"]["HEADER"]).pack()
+        sf = tk.Frame(self.root, bg=CORE_UI["THEME"]["BG"], pady=15); sf.pack(fill="x", padx=20)
+        self.search_var = tk.StringVar(); self.search_var.trace_add("write", self.filter_inventory)
+        tk.Entry(sf, textvariable=self.search_var, font=("Arial", 12), width=50).pack(side="left", padx=10)
+        self.tree = ttk.Treeview(self.root, columns=('Code', 'Cat', 'Desc', 'Stock', 'Cost'), show='headings')
+        for c in ('Code', 'Cat', 'Desc', 'Stock', 'Cost'): self.tree.heading(c, text=c); self.tree.column(c, width=150)
+        self.tree.pack(fill="both", expand=True, padx=20); self.tree.bind("<Return>", self.on_item_add_popup)
+        self.cart_tree = ttk.Treeview(self.root, columns=('Code', 'Desc', 'Qty', 'Cost', 'Total'), show='headings', height=6)
+        for c in ('Code', 'Desc', 'Qty', 'Cost', 'Total'): self.cart_tree.heading(c, text=c); self.cart_tree.column(c, width=150)
+        self.cart_tree.pack(fill="x", padx=20, pady=5); self.cart_tree.bind("<Return>", self.cart_edit_qty)
+        btm = tk.Frame(self.root, bg=CORE_UI["THEME"]["HEADER"], pady=10); btm.pack(fill="x", side="bottom")
+        self.cart_lbl = tk.Label(btm, text="TOTAL: 0.00", bg=CORE_UI["THEME"]["HEADER"], fg=CORE_UI["THEME"]["ON"], font=("Arial", 18, "bold")); self.cart_lbl.pack(side="left", padx=20)
+        tk.Button(btm, text="🚀 SUBMIT", bg=CORE_UI["THEME"]["ON"], fg="white", font=("Arial", 11, "bold"), width=15, height=2, command=self.submit_to_chef).pack(side="right", padx=10)
+        tk.Button(btm, text="🔍 PREVIEW", bg="#2196F3", fg="white", font=("Arial", 11, "bold"), width=15, height=2, command=self.show_outlet_order_preview).pack(side="right", padx=10)
+        self.update_tree_view(self.inventory)
+
+    def on_item_add_popup(self, event):
+        sel = self.tree.selection()
+        if not sel: return
+        vals = self.tree.item(sel[0], 'values'); q = simpledialog.askfloat("Quantity", f"Qty for {vals[2]}:")
+        if q: c = self.safe_float(vals[4]); self.cart.append({'Code': vals[0], 'Desc': vals[2], 'Qty': q, 'Cost': c, 'Total': q*c}); self.refresh_cart_display()
+
+    def cart_edit_qty(self, event):
+        sel = self.cart_tree.selection()
+        if not sel: return
+        idx = self.cart_tree.index(sel[0]); old = self.cart[idx]
+        new_q = simpledialog.askfloat("Edit", f"New Qty for {old['Desc']}:", initialvalue=old['Qty'])
+        if new_q is not None:
+            if new_q <= 0: del self.cart[idx]
+            else: self.cart[idx]['Qty'] = new_q; self.cart[idx]['Total'] = new_q * old['Cost']
+            self.refresh_cart_display()
+
+    def refresh_cart_display(self):
+        for i in self.cart_tree.get_children(): self.cart_tree.delete(i)
+        for i in self.cart: self.cart_tree.insert('', 'end', values=(i['Code'], i['Desc'], f"{i['Qty']:.2f}", f"{i['Cost']:,.2f}", f"{i['Total']:,.2f}"))
+        self.cart_lbl.config(text=f"TOTAL: {sum(i['Total'] for i in self.cart):,.2f}")
+
+    def show_outlet_order_preview(self):
+        if not self.cart: return
+        d = {'ReqID': self.req_id, 'Date': self.req_date, 'Outlet': self.selected_outlet, 'TotalValue': sum(i['Total'] for i in self.cart), 'Items': str(self.cart)}
+        self.show_transaction_print(d)
+
+    def delete_inventory_item(self):
+        sel = self.admin_tree.selection()
+        if sel: idx = self.admin_tree.index(sel[0]); del self.inventory[idx]; self.save_to_db(); self.refresh_admin_table()
+
+    def filter_inventory(self, *args):
+        q = self.search_var.get().lower(); f = [i for i in self.inventory if q in i.get('Product code','').lower() or q in i.get('Product Description','').lower()]; self.update_tree_view(f)
+
+    def update_tree_view(self, data):
+        for i in self.tree.get_children(): self.tree.delete(i)
+        for r in data: self.tree.insert('', 'end', values=(r.get('Product code'), r.get('Category'), r.get('Product Description'), r.get('Stock On Hand'), r.get('Unit cost')))
+
+    def submit_to_chef(self):
+        if not self.cart: return
+        with open(self.trans_file, 'a', newline='', encoding='utf-8') as f:
+            dw = csv.DictWriter(f, fieldnames=['ReqID', 'Date', 'Outlet', 'Subject', 'TotalValue', 'Status', 'Items'])
+            dw.writerow({'ReqID': self.req_id, 'Date': self.req_date, 'Outlet': self.selected_outlet, 'Subject': self.order_subject, 'TotalValue': sum(i['Total'] for i in self.cart), 'Status': 'UN-APPROVED STOCK REQUEST', 'Items': str(self.cart)})
+
+        # Styled confirmation modal
+        win = tk.Toplevel(self.root)
+        win.title("Request Sent")
+        win.transient(self.root)
+        win.grab_set()
+        win.configure(bg=CORE_UI["THEME"]["BG"], padx=20, pady=20)
+        win.geometry("480x220")
+        tk.Label(win, text="✅ Request Sent to Chef", font=("Arial", 16, "bold"), bg=CORE_UI["THEME"]["BG"], fg="white").pack(pady=(10,6))
+        tk.Label(win, text=f"ReqID: {self.req_id}", font=("Arial", 11), bg=CORE_UI["THEME"]["BG"], fg=CORE_UI["THEME"]["ON"]).pack(pady=4)
+        tk.Label(win, text=f"Outlet: {self.selected_outlet}", font=("Arial", 11), bg=CORE_UI["THEME"]["BG"], fg="white").pack(pady=2)
+        tk.Label(win, text=f"Total: LKR {sum(i['Total'] for i in self.cart):,.2f}", font=("Arial", 11, "bold"), bg=CORE_UI["THEME"]["BG"], fg="white").pack(pady=6)
+
+        def ok_and_close():
+            win.destroy(); self.show_login_screen()
+
+        tk.Button(win, text="OK", bg=CORE_UI["THEME"]["ON"], fg="white", font=("Arial", 11, "bold"), width=12, command=ok_and_close).pack(pady=12)
+
+    def load_transactions(self, status, tree):
+        for i in tree.get_children(): tree.delete(i)
+        try:
+            with open(self.trans_file, 'r', encoding='utf-8') as f:
+                for r in csv.DictReader(f):
+                    if r.get('Status') == status:
+                        cols = tree['columns']
+                        vals = []
+                        for c in cols:
+                            if c == 'ID': vals.append(r.get('ReqID'))
+                            elif c == 'Total': vals.append(r.get('TotalValue'))
+                            else: vals.append(r.get(c) if c in r else r.get(c) if c in r else r.get(c))
+                        tree.insert('', 'end', values=tuple(vals))
+        except Exception:
+            pass
+
+    def print_selected_trans(self):
+        sel = self.trans_tree.selection(); rid = self.trans_tree.item(sel[0], 'values')[0] if sel else None
+        if rid:
+            with open(self.trans_file, 'r') as f:
+                for r in csv.DictReader(f):
+                    if r['ReqID'] == rid: self.show_transaction_print(r); break
+
+    def build_chef_dashboard(self):
+        self.clear_ui()
+        header = tk.Frame(self.root, bg="#222")
+        header.pack(fill="x")
+        tk.Label(header, text="CHEF APPROVAL", bg="#222", fg="white", font=("Arial", 18)).pack(side='left', padx=10, pady=8)
+        btn_f = tk.Frame(header, bg="#222"); btn_f.pack(side='right', padx=10)
+        # Back to main/user panel
+        tk.Button(btn_f, text="BACK", bg="#607D8B", fg="white", font=("Arial", 11, "bold"), width=10, command=self.show_login_screen).pack(side='left', padx=6)
+        tk.Button(btn_f, text="STOCK REPORT", bg="#455A64", fg="white", font=("Arial", 11, "bold"), width=13, command=self.show_stock_report).pack(side='left', padx=6)
+        tk.Button(btn_f, text="EXPORT TO EXCEL", bg="#1976D2", fg="white", font=("Arial", 11, "bold"), width=16, command=self.export_stock_on_hand_to_excel).pack(side='left', padx=6)
+
+        cols = ('ReqID', 'Date', 'Outlet', 'Subject', 'Total')
+        t = ttk.Treeview(self.root, columns=cols, show='headings')
+        for c in cols:
+            t.heading(c, text=c); t.column(c, anchor='center')
+        t.pack(fill='both', expand=True, padx=12, pady=12)
+        self.load_transactions('UN-APPROVED STOCK REQUEST', t)
+
+        tk.Button(btn_f, text="VIEW & EDIT", bg="#1976D2", fg="white", font=("Arial", 11, "bold"), width=14, command=lambda: self.chef_review(t)).pack(side='left', padx=6)
+        tk.Button(btn_f, text="APPROVE SELECTED", bg=CORE_UI["THEME"]["ON"], fg="white", font=("Arial", 11, "bold"), width=16, command=lambda: self.chef_approve_logic(t)).pack(side='left', padx=6)
+        t.bind('<Double-1>', lambda e: self.chef_review(t))
+
+    def chef_approve_logic(self, t):
+        sel = t.selection(); rid = t.item(sel[0], 'values')[0] if sel else None
+        if rid:
+            rows = []
+            with open(self.trans_file, 'r') as f:
+                rdr = csv.DictReader(f); fn = rdr.fieldnames
+                for r in rdr:
+                    if r['ReqID'] == rid: r['Status'] = 'CHEF APPROVED'
+                    rows.append(r)
+            with open(self.trans_file, 'w', newline='') as f:
+                dw = csv.DictWriter(f, fieldnames=fn); dw.writeheader(); dw.writerows(rows)
+            self.build_chef_dashboard()
+
+    def chef_review(self, tree):
+        sel = tree.selection()
+        if not sel:
+            messagebox.showwarning("Select", "Please select a request to open.")
+            return
+        rid = tree.item(sel[0], 'values')[0]
+        with open(self.trans_file, 'r', encoding='utf-8') as f:
+            all_t = list(csv.DictReader(f))
+        req = next((r for r in all_t if r['ReqID'] == rid), None)
+        if not req:
+            messagebox.showerror("Error", "Request not found")
+            return
+
+        try:
+            items = ast.literal_eval(req.get('Items', '[]'))
+        except Exception:
+            items = []
+
+        rev = tk.Toplevel(self.root); rev.state('zoomed'); rev.configure(bg="#DDD")
+        paper = tk.Frame(rev, bg="white", padx=30, pady=30); paper.pack(pady=20, fill="both", expand=True)
+        tk.Label(paper, text="STOCK REQUISITION", font=("Arial", 20, "bold"), bg="white").pack()
+        tk.Label(paper, text=f"REQ: {rid} | {req.get('Outlet','')} | {req.get('Date','')}\nSubject: {req.get('Subject','')}", bg="white", justify="left").pack(pady=10)
+
+        t = ttk.Treeview(paper, columns=('Code', 'Desc', 'Qty', 'Cost', 'Total'), show='headings', selectmode='browse')
+        for col, width in (('Code',100), ('Desc',450), ('Qty',100), ('Cost',120), ('Total',120)):
+            anchor = 'w' if col in ('Code', 'Desc') else 'e' if col in ('Cost','Total') else 'center'
+            t.heading(col, text=col); t.column(col, width=width, anchor=anchor)
+        t.pack(fill="both", expand=True, padx=10, pady=10)
+
+        total_lbl = tk.Label(paper, text="TOTAL: LKR 0.00", font=("Arial", 14, "bold"), bg='white')
+        total_lbl.pack(pady=6)
+
+        def refresh_items():
+            for i in t.get_children(): t.delete(i)
+            for it in items:
+                t.insert('', 'end', values=(it.get('Code',''), it.get('Desc',''), f"{float(it.get('Qty',0)):.2f}", f"{float(it.get('Cost',0)):,.2f}", f"{float(it.get('Total',0)):,.2f}"))
+            total = sum(float(it.get('Total',0) or 0) for it in items)
+            try:
+                total_lbl.config(text=f"TOTAL: LKR {total:,.2f}")
+            except Exception:
+                pass
+
+        refresh_items()
+
+        def open_cell_editor(item_id, col_name):
+            # Only allow Qty edits from chef review. Other columns are read-only.
+            if not item_id: return
+            if col_name != 'Qty':
+                return
+            idx = t.index(item_id)
+            old = items[idx]
+            try:
+                curv = float(old.get('Qty', 0) or 0)
+            except:
+                curv = 0.0
+            new_q = simpledialog.askfloat("Edit Qty", f"New Qty for {old.get('Desc','')}:", initialvalue=curv, parent=rev)
+            if new_q is None:
+                return
+            if new_q <= 0:
+                del items[idx]
+            else:
+                old['Qty'] = new_q
+                try: cost = float(old.get('Cost', 0) or 0)
+                except: cost = 0
+                old['Total'] = new_q * cost
+            refresh_items(); autosave_items()
+            # move to next row automatically if exists
+            children = t.get_children()
+            next_idx = idx + 1
+            if next_idx < len(children):
+                next_item = children[next_idx]
+                rev.after(50, lambda: open_cell_editor(next_item, 'Qty'))
+            return
+
+        # Only allow keyboard-triggered editing (Return / F2). Disable mouse double-click edits.
+        try: t.unbind('<Double-1>')
+        except: pass
+        def edit_cell_inline(event=None):
+            # Keyboard-only: edit Qty for the selected row
+            try:
+                sel = t.selection()
+                if not sel:
+                    return
+                item_id = sel[0]
+                open_cell_editor(item_id, 'Qty')
+            except Exception:
+                return
+
+        t.bind('<Return>', edit_cell_inline)
+        t.bind('<F2>', edit_cell_inline)
+
+        def autosave_items():
+            for r in all_t:
+                if r.get('ReqID') == rid:
+                    r['Items'] = str(items)
+                    try: r['TotalValue'] = str(sum(float(it.get('Total',0) or 0) for it in items))
+                    except: r['TotalValue'] = '0'
+                    break
+            try:
+                with open(self.trans_file, 'w', newline='', encoding='utf-8') as f:
+                    dw = csv.DictWriter(f, fieldnames=all_t[0].keys()); dw.writeheader(); dw.writerows(all_t)
+            except Exception:
+                pass
+
+        def approve_and_print():
+            for r in all_t:
+                if r.get('ReqID') == rid:
+                    r['Status'] = 'CHEF APPROVED'
+                    r['Items'] = str(items)
+                    try: r['TotalValue'] = str(sum(float(it.get('Total',0) or 0) for it in items))
+                    except: r['TotalValue'] = '0'
+                    break
+            with open(self.trans_file, 'w', newline='', encoding='utf-8') as f:
+                dw = csv.DictWriter(f, fieldnames=all_t[0].keys()); dw.writeheader(); dw.writerows(all_t)
+            def _close_review_and_refresh():
+                try:
+                    rev.destroy()
+                except:
+                    pass
+                try:
+                    self.build_chef_dashboard()
+                except:
+                    pass
+
+            try:
+                self.show_transaction_print({'ReqID': rid, 'Date': r.get('Date',''), 'Outlet': r.get('Outlet',''), 'TotalValue': r.get('TotalValue','0'), 'Items': str(items), 'Status': 'CHEF APPROVED'}, on_close=_close_review_and_refresh)
+            except Exception as e:
+                messagebox.showerror('Print Error', f'Unable to open print preview: {e}')
+
+        btn_frame = tk.Frame(paper, bg='white')
+        btn_frame.pack(pady=8)
+        tk.Button(btn_frame, text='Save Changes', bg='#1976D2', fg='white', command=lambda: (autosave_items(), messagebox.showinfo('Saved','Changes saved'))).pack(side='left', padx=6)
+        tk.Button(btn_frame, text='Approve & Print', bg=CORE_UI['THEME']['ON'], fg='white', command=approve_and_print).pack(side='left', padx=6)
+
+    def build_store_dashboard(self):
+        # Reworked storekeeper dashboard: single implementation inside class
+        self.clear_ui()
+        header = tk.Frame(self.root, bg=THEME["BG"])
+        header.pack(fill="x")
+        tk.Label(header, text="STOREKEEPER VIEW - APPROVED REQUESTS", bg=THEME["BG"], fg="white", font=("Arial", 16)).pack(side="left", padx=20, pady=12)
+        tk.Button(header, text="LOGOUT", bg="#D32F2F", fg="white", command=self.show_login_screen).pack(side="right", padx=20, pady=8)
+
+        # Date filter
+        filter_frame = tk.Frame(self.root, bg=THEME["BG"])
+        filter_frame.pack(pady=8, padx=20, fill="x")
+        tk.Label(filter_frame, text="Filter by Request Date:", bg=THEME["BG"], fg="white").pack(side="left")
+        date_var = tk.StringVar()
+        date_entry = DateEntry(filter_frame, textvariable=date_var, width=12, background='black', foreground='white', borderwidth=2, date_pattern='yyyy-mm-dd')
+        date_entry.pack(side="left", padx=(8,12))
+        # ReqID search
+        tk.Label(filter_frame, text="Search ReqID:", bg=THEME["BG"], fg="white").pack(side="left", padx=(20,4))
+        req_search_var = tk.StringVar()
+        tk.Entry(filter_frame, textvariable=req_search_var, width=18).pack(side="left", padx=(4,8))
+        tk.Button(filter_frame, text="APPLY", bg=THEME["ON"], fg="white", command=lambda: refresh_tree(date_var.get(), req_search_var.get())).pack(side="left", padx=6)
+        tk.Button(filter_frame, text="CLEAR", bg="#607D8B", fg="white", command=lambda: (date_var.set(""), req_search_var.set(""), refresh_tree("", ""))).pack(side="left", padx=6)
+
+        # Treeview showing full details
+        cols = ('Date', 'ReqID', 'Outlet', 'Subject', 'TotalValue')
+        tree = ttk.Treeview(self.root, columns=cols, show='headings')
+        for c in cols:
+            tree.heading(c, text=c)
+            tree.column(c, anchor="center", width=140 if c != 'Subject' else 300)
+        tree.pack(fill="both", expand=True, padx=20, pady=10)
+
+        def refresh_tree(filter_date="", req_id=""):
+            for i in tree.get_children():
+                tree.delete(i)
+            try:
+                with open(TRANS_FILE, 'r', encoding='utf-8') as f:
+                    for r in csv.DictReader(f):
+                        if r.get('Status') != 'CHEF APPROVED':
+                            continue
+                        if filter_date:
+                            if r.get('Date') != filter_date:
+                                continue
+                        if req_id:
+                            if req_id.strip() not in str(r.get('ReqID','')):
+                                continue
+                        tree.insert('', 'end', values=(r.get('Date',''), r.get('ReqID',''), r.get('Outlet',''), r.get('Subject',''), r.get('TotalValue','0')))
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+
+        refresh_tree()
+
+        action_frame = tk.Frame(self.root, bg=THEME["BG"])
+        action_frame.pack(fill="x", padx=20, pady=(0, 10))
+
+        def open_selected_breakdown():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Select Transaction", "Please select a transaction first.")
+                return
+            vals = tree.item(sel[0], 'values')
+            rid = vals[1] if len(vals) > 1 else None
+            if not rid:
+                return
+            print(f"Opening breakdown for {rid}")
+            try:
+                with open(TRANS_FILE, 'r', encoding='utf-8') as f:
+                    for r in csv.DictReader(f):
+                        if r.get('ReqID') == rid:
+                            self.show_store_transaction_breakdown(r)
+                            break
+            except Exception as e:
+                print(f"Error opening breakdown: {e}")
+                messagebox.showerror("Error", f"Unable to open breakdown: {e}")
+
+        def open_selected_issue():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Select Transaction", "Please select a transaction first.")
+                return
+            vals = tree.item(sel[0], 'values')
+            rid = vals[1] if len(vals) > 1 else None
+            if not rid:
+                return
+            print(f"Opening store_review for {rid}")
+            try:
+                self.store_review(rid)
+            except Exception:
+                pass
+
+        tk.Button(action_frame, text="ISSUE / EDIT", bg=THEME["ON"], fg="white", width=16, command=open_selected_issue).pack(side="left", padx=(0, 8))
+        tk.Button(action_frame, text="VIEW ITEM BREAKDOWN", bg="#1976D2", fg="white", width=24, command=open_selected_breakdown).pack(side="left", padx=(0, 8))
+        tk.Button(action_frame, text="STOCK REPORT", bg="#455A64", fg="white", width=14, command=self.show_stock_report).pack(side="left", padx=(0, 8))
+        tk.Button(action_frame, text="EXPORT TO EXCEL", bg="#1976D2", fg="white", width=16, command=self.export_stock_on_hand_to_excel).pack(side="left", padx=(0, 8))
+
+        # double-click to open issue/edit screen
+        def on_double(e):
+            print("Double-click detected")
+            open_selected_issue()
+
+        tree.bind('<Double-1>', on_double)
+
+    def show_store_transaction_breakdown(self, req_data):
+        try:
+            items = ast.literal_eval(req_data.get('Items', '[]'))
+        except Exception:
+            items = []
+
+        # Ensure Issued fields exist - default to requested quantity if not issued yet
+        for it in items:
+            it['Issued'] = self.safe_float(it.get('Issued', 0))
+            if it['Issued'] == 0:  # If not issued yet, default to requested quantity
+                it['Issued'] = self.safe_float(it.get('Qty', 0))
+            it['Cost'] = self.safe_float(it.get('Cost', 0))
+            it['IssuedTotal'] = it['Issued'] * it['Cost']
+
+        win = tk.Toplevel(self.root)
+        win.title(f"Item Breakdown - {req_data.get('ReqID', '')}")
+        win.geometry("1000x700")
+        win.configure(bg=CORE_UI["THEME"]["BG"])
+
+        header = tk.Frame(win, bg=CORE_UI["THEME"]["HEADER"])
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text=f"TRANSACTION: {req_data.get('ReqID', '')}   |   OUTLET: {req_data.get('Outlet', '')}   |   DATE: {req_data.get('Date', '')}",
+            bg=CORE_UI["THEME"]["HEADER"],
+            fg="white",
+            font=("Arial", 11, "bold")
+        ).pack(side="left", padx=12, pady=10)
+
+        body = tk.Frame(win, bg=CORE_UI["THEME"]["BG"])
+        body.pack(fill="both", expand=True, padx=12, pady=12)
+
+        cols = ('Code', 'Description', 'RequestedQty', 'IssuedQty', 'UnitCost', 'LineTotal')
+        breakdown_tree = ttk.Treeview(body, columns=cols, show='headings')
+        for col, width, anchor in (
+            ('Code', 120, 'w'),
+            ('Description', 360, 'w'),
+            ('RequestedQty', 120, 'e'),
+            ('IssuedQty', 120, 'e'),
+            ('UnitCost', 120, 'e'),
+            ('LineTotal', 130, 'e'),
+        ):
+            breakdown_tree.heading(col, text=col)
+            breakdown_tree.column(col, width=width, anchor=anchor)
+        breakdown_tree.pack(fill="both", expand=True)
+
+        total_lbl = tk.Label(body, text="ISSUED TOTAL: LKR 0.00", bg=CORE_UI["THEME"]["BG"], fg="white", font=("Arial", 14, "bold"))
+        total_lbl.pack(anchor="e", pady=(6,0))
+
+        def refresh_breakdown_view():
+            for ch in breakdown_tree.get_children():
+                breakdown_tree.delete(ch)
+            total = 0.0
+            for item in items:
+                code = str(item.get('Code') or item.get('Product code') or '').strip()
+                desc = str(item.get('Desc') or item.get('Product Description') or '').strip()
+                req_qty = self.safe_float(item.get('Qty', 0))
+                issued_qty = self.safe_float(item.get('Issued', 0))
+                cost = self.safe_float(item.get('Cost', 0))
+                issued_total = issued_qty * cost
+                item['IssuedTotal'] = issued_total
+                total += issued_total
+
+                breakdown_tree.insert(
+                    '',
+                    'end',
+                    values=(
+                        code,
+                        desc,
+                        f"{req_qty:.2f}",
+                        f"{issued_qty:.2f}",
+                        f"{cost:,.2f}",
+                        f"{issued_total:,.2f}"
+                    )
+                )
+            total_lbl.config(text=f"ISSUED TOTAL: LKR {total:,.2f}")
+
+        refresh_breakdown_view()
+
+        # Auto-start editing the first item
+        if items:
+            children = breakdown_tree.get_children()
+            if children:
+                breakdown_tree.selection_set(children[0])
+                breakdown_tree.focus_set()
+                breakdown_tree.after(200, lambda: start_inline_edit(0))  # Start editing first item after window loads
+
+        editor = {'entry': None}
+
+        def start_inline_edit(row_idx):
+            if row_idx < 0 or row_idx >= len(items):
+                return
+            iid = breakdown_tree.get_children()[row_idx]
+            col_index = cols.index('IssuedQty')
+            bbox = breakdown_tree.bbox(iid, f"#{col_index+1}")
+            if not bbox:
+                return
+            if editor['entry']:
+                try: editor['entry'].destroy()
+                except: pass
+            ent = tk.Entry(breakdown_tree, justify='center')
+            ent_val = items[row_idx].get('Issued', 0)
+            ent.insert(0, f"{float(ent_val):.2f}")
+            ent.place(x=bbox[0], y=bbox[1], width=bbox[2], height=bbox[3])
+            ent.focus_set()
+            editor['entry'] = ent
+
+            def finish_and_save():
+                val = ent.get().strip()
+                try:
+                    newf = float(val)
+                except:
+                    newf = 0.0
+                items[row_idx]['Issued'] = newf if newf >= 0 else 0.0
+                items[row_idx]['IssuedTotal'] = items[row_idx]['Issued'] * self.safe_float(items[row_idx].get('Cost', 0))
+                try:
+                    ent.destroy()
+                except: pass
+                editor['entry'] = None
+                refresh_breakdown_view()
+                # Auto-advance to next row
+                children = breakdown_tree.get_children()
+                next_idx = row_idx + 1
+                if next_idx < len(children):
+                    breakdown_tree.selection_set(children[next_idx])
+                    breakdown_tree.see(children[next_idx])
+                    breakdown_tree.focus_set()
+                    # Start editing the next row after a short delay
+                    breakdown_tree.after(100, lambda: start_inline_edit(next_idx))
+
+            def cancel_edit(event=None):
+                try:
+                    ent.destroy()
+                except: pass
+                editor['entry'] = None
+                breakdown_tree.focus_set()
+
+            ent.bind('<Return>', lambda e: finish_and_save())
+            ent.bind('<KP_Enter>', lambda e: finish_and_save())
+            ent.bind('<Escape>', cancel_edit)
+
+        def keyboard_edit(event=None):
+            sel = breakdown_tree.selection()
+            if not sel:
+                children = breakdown_tree.get_children()
+                if not children:
+                    return
+                breakdown_tree.selection_set(children[0])
+                sel = breakdown_tree.selection()
+            iid = sel[0]
+            row_idx = breakdown_tree.index(iid)
+            start_inline_edit(row_idx)
+
+        def cell_edit(event):
+            # Allow direct clicking on IssuedQty column
+            region = breakdown_tree.identify_region(event.x, event.y)
+            if region == "cell":
+                col = breakdown_tree.identify_column(event.x)
+                if col == "#4":  # IssuedQty column (1-indexed)
+                    row = breakdown_tree.identify_row(event.y)
+                    if row:
+                        breakdown_tree.selection_set(row)
+                        row_idx = breakdown_tree.index(row)
+                        start_inline_edit(row_idx)
+
+        breakdown_tree.bind('<Return>', keyboard_edit)
+        breakdown_tree.bind('<KP_Enter>', keyboard_edit)
+        breakdown_tree.bind('<F2>', keyboard_edit)
+        breakdown_tree.bind('<Double-1>', cell_edit)  # Double-click on cell
+        breakdown_tree.bind('<Button-1>', cell_edit)  # Single click on cell
+
+        footer = tk.Frame(win, bg=CORE_UI["THEME"]["BG"])
+        footer.pack(fill="x", padx=12, pady=(0, 12))
+
+        def save_changes():
+            # Update the transaction with new items
+            try:
+                with open(TRANS_FILE, 'r', encoding='utf-8') as f:
+                    all_t = list(csv.DictReader(f))
+            except Exception:
+                messagebox.showerror("Error", "Unable to read transactions file.")
+                return
+
+            for r in all_t:
+                if r.get('ReqID') == req_data.get('ReqID'):
+                    r['Items'] = str(items)
+                    r['TotalValue'] = str(sum(float(it.get('IssuedTotal',0) or 0) for it in items))
+                    break
+
+            try:
+                with open(TRANS_FILE, 'w', newline='', encoding='utf-8') as f:
+                    dw = csv.DictWriter(f, fieldnames=all_t[0].keys())
+                    dw.writeheader()
+                    dw.writerows(all_t)
+                messagebox.showinfo("Saved", "Changes saved successfully.")
+                # Keep window open for further editing
+            except Exception as e:
+                messagebox.showerror("Error", f"Unable to save: {e}")
+
+        def book_and_preview():
+            # Update transaction to BOOKED
+            try:
+                with open(TRANS_FILE, 'r', encoding='utf-8') as f:
+                    all_t = list(csv.DictReader(f))
+            except Exception:
+                messagebox.showerror("Error", "Unable to read transactions file.")
+                return
+
+            for r in all_t:
+                if r.get('ReqID') == req_data.get('ReqID'):
+                    r['Status'] = 'BOOKED'
+                    r['Items'] = str(items)
+                    r['TotalValue'] = str(sum(float(it.get('IssuedTotal',0) or 0) for it in items))
+                    break
+
+            try:
+                with open(TRANS_FILE, 'w', newline='', encoding='utf-8') as f:
+                    dw = csv.DictWriter(f, fieldnames=all_t[0].keys())
+                    dw.writeheader()
+                    dw.writerows(all_t)
+            except Exception as e:
+                messagebox.showerror("Error", f"Unable to update transaction: {e}")
+                return
+
+            # Deduct issued qty from inventory
+            self.load_data()
+            inv_changed = False
+            for it in items:
+                code = str(it.get('Code') or it.get('Product code') or '').strip()
+                issued_qty = self.safe_float(it.get('Issued', 0))
+                if not code or issued_qty == 0: continue
+                for row in self.inventory:
+                    if str(row.get('Product code','')).strip() == code:
+                        cur_stock = self.safe_float(row.get('Stock On Hand', 0))
+                        new_stock = max(0, cur_stock - issued_qty)
+                        row['Stock On Hand'] = f"{new_stock:.2f}"
+                        uc = self.safe_float(row.get('Unit cost', 0))
+                        row['Total Value'] = f"{new_stock * uc:.2f}"
+                        inv_changed = True
+                        break
+            if inv_changed:
+                try: self.save_to_db()
+                except Exception as e: messagebox.showwarning("Warning", f"Booked but failed to update inventory: {e}")
+
+            # Prepare printable items
+            printable_items = []
+            for it in items:
+                printable_items.append({
+                    'Code': it.get('Code',''),
+                    'Desc': it.get('Desc',''),
+                    'ReqQty': it.get('Qty', 0),  # Original requested quantity
+                    'IssuQty': it.get('Issued', 0),  # Actually issued quantity
+                    'Cost': it.get('Cost', 0),
+                    'Total': it.get('IssuedTotal', 0)  # Based on issued quantity
+                })
+            total_val = sum(float(pi.get('Total',0) or 0) for pi in printable_items)
+            win.destroy()
+            # After booking we should refresh the store dashboard so the recorded transaction disappears from pending view.
+            def _after_print_close():
+                try:
+                    self.build_store_dashboard()
+                except Exception:
+                    pass
+
+            self.show_transaction_print({'ReqID': req_data.get('ReqID',''), 'Date': req_data.get('Date',''), 'Outlet': req_data.get('Outlet',''), 'TotalValue': total_val, 'Items': str(printable_items), 'Status': 'BOOKED'}, on_close=_after_print_close)
+
+        tk.Button(footer, text="SAVE", bg="#455A64", fg="white", width=12, command=save_changes).pack(side="left", padx=(0, 8))
+        tk.Button(footer, text="BOOK & PREVIEW", bg=THEME["ON"], fg="white", width=16, command=book_and_preview).pack(side="left", padx=(0, 8))
+        tk.Button(footer, text="CLOSE", bg="#666", fg="white", width=12, command=win.destroy).pack(side="right")
+
+if __name__ == "__main__":
+    root = tk.Tk(); app = MarriottUltimateSystem(root); root.mainloop()
+
+
+    def save_changes(self, all_t, req_id, items, silent=False):
+        for r in all_t:
+            if r.get('ReqID') == req_id:
+                r['Items'] = str(items)
+                r['TotalValue'] = str(sum(float(it.get('IssuedTotal',0) or 0) for it in items))
+                break
+        try:
+            with open(TRANS_FILE, 'w', newline='', encoding='utf-8') as f:
+                dw = csv.DictWriter(f, fieldnames=all_t[0].keys()); dw.writeheader(); dw.writerows(all_t)
+        except Exception as e:
+            if not silent:
+                messagebox.showerror("Error", f"Unable to save changes: {e}")
+
+# ...existing code...
+
+    def store_review(self, req_id):
+        print(f"store_review opened for {req_id}")
+        # Modal for storekeeper to enter physically issued quantities, save and book (updates inventory and prints A4 preview)
+        try:
+            with open(TRANS_FILE, 'r', encoding='utf-8') as f:
+                all_t = list(csv.DictReader(f))
+        except Exception:
+            messagebox.showerror("Error", "Unable to read transactions file.")
+            return
+        req = next((r for r in all_t if r.get('ReqID') == req_id), None)
+        if not req:
+            messagebox.showerror("Error", "Request not found.")
+            return
+
+        try:
+            items = ast.literal_eval(req.get('Items', '[]'))
+        except Exception:
+            items = []
+
+        # normalize items and ensure Issued fields
+        for it in items:
+            try: it['Qty'] = float(it.get('Qty', it.get('Qty', 0) or 0))
+            except: it['Qty'] = 0.0
+            try: it['Cost'] = float(it.get('Cost', it.get('Cost', 0) or 0))
+            except: it['Cost'] = 0.0
+            try: it['Issued'] = float(it.get('Issued', 0) or 0)
+            except: it['Issued'] = 0.0
+            it['IssuedTotal'] = round(it['Issued'] * it['Cost'], 2)
+
+        win = tk.Toplevel(self.root); win.state('zoomed'); win.configure(bg="#EEE"); win.title(f"Issue Items - {req_id}")
+        frame = tk.Frame(win, bg="white", padx=20, pady=20); frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        tk.Label(frame, text=f"ISSUE FOR REQ: {req_id} | {req.get('Outlet','')} | {req.get('Date','')}", bg="white", font=("Arial", 14, "bold")).pack(anchor="w")
+
+        cols = ('Code', 'Desc', 'ReqQty', 'Issued', 'Cost', 'IssuedTotal')
+        t = ttk.Treeview(frame, columns=cols, show='headings', height=18)
+        for col, w in (('Code',100), ('Desc',420), ('ReqQty',100), ('Issued',100), ('Cost',120), ('IssuedTotal',120)):
+            anchor = 'w' if col in ('Code','Desc') else 'e'
+            t.heading(col, text=col); t.column(col, width=w, anchor=anchor)
+        t.pack(fill="both", expand=True, pady=10)
+
+        total_lbl = tk.Label(frame, text="ISSUED TOTAL: LKR 0.00", bg="white", font=("Arial", 14, "bold"))
+        total_lbl.pack(anchor="e", pady=(6,0))
+
+        def refresh_items_view():
+            for ch in t.get_children(): t.delete(ch)
+            for it in items:
+                code = it.get('Code') or it.get('Product code') or ''
+                desc = it.get('Desc') or it.get('Product Description') or ''
+                reqq = float(it.get('Qty', 0) or 0)
+                cost = float(it.get('Cost', 0) or 0)
+                issued = float(it.get('Issued', 0) or 0)
+                it['IssuedTotal'] = round(issued * cost, 2)
+                t.insert('', 'end', values=(code, desc, f"{reqq:.2f}", f"{issued:.2f}", f"{cost:,.2f}", f"{it['IssuedTotal']:,.2f}"))
+            update_total_lbl()
+
+        def update_total_lbl():
+            total = sum(float(it.get('IssuedTotal', 0) or 0) for it in items)
+            total_lbl.config(text=f"ISSUED TOTAL: LKR {total:,.2f}")
+
+        refresh_items_view()
+
+        editor = {'entry': None}
+
+        def save_changes(silent=False):
+            for r in all_t:
+                if r.get('ReqID') == req_id:
+                    r['Items'] = str(items)
+                    r['TotalValue'] = str(sum(float(it.get('IssuedTotal',0) or 0) for it in items))
+                    break
+            try:
+                with open(TRANS_FILE, 'w', newline='', encoding='utf-8') as f:
+                    dw = csv.DictWriter(f, fieldnames=all_t[0].keys()); dw.writeheader(); dw.writerows(all_t)
+                if not silent:
+                    messagebox.showinfo("Saved", "Issued quantities saved.")
+            except Exception as e:
+                if not silent:
+                    messagebox.showerror("Error", f"Unable to save: {e}")
+
+        def save_changes(silent=False):
+            for r in all_t:
+                if r.get('ReqID') == req_id:
+                    r['Items'] = str(items)
+                    r['TotalValue'] = str(sum(float(it.get('IssuedTotal',0) or 0) for it in items))
+                    break
+            try:
+                with open(TRANS_FILE, 'w', newline='', encoding='utf-8') as f:
+                    dw = csv.DictWriter(f, fieldnames=all_t[0].keys()); dw.writeheader(); dw.writerows(all_t)
+                if not silent:
+                    messagebox.showinfo("Saved", "Issued quantities saved.")
+            except Exception as e:
+                if not silent:
+                    messagebox.showerror("Error", f"Unable to save: {e}")
+
+        def start_inline_edit(row_idx):
+            if row_idx < 0 or row_idx >= len(items):
+                return
+            iid = t.get_children()[row_idx]
+            col_index = cols.index('Issued')
+            bbox = t.bbox(iid, f"#{col_index+1}")
+            if not bbox:
+                return
+            if editor['entry']:
+                try: editor['entry'].destroy()
+                except: pass
+            ent = tk.Entry(t, justify='center')
+            ent_val = items[row_idx].get('Issued', 0)
+            ent.insert(0, f"{float(ent_val):.2f}")
+            ent.place(x=bbox[0], y=bbox[1], width=bbox[2], height=bbox[3])
+            ent.focus_set()
+            editor['entry'] = ent
+
+            def finish_and_advance(event=None):
+                val = ent.get().strip()
+                try:
+                    newf = float(val)
+                except:
+                    newf = 0.0
+                items[row_idx]['Issued'] = newf if newf > 0 else 0.0
+                items[row_idx]['IssuedTotal'] = round(items[row_idx]['Issued'] * float(items[row_idx].get('Cost', 0) or 0), 2)
+                try:
+                    ent.destroy()
+                except: pass
+                editor['entry'] = None
+                refresh_items_view()
+                self.save_changes(all_t, req_id, items, silent=True)
+                # auto-advance to next row
+                children = t.get_children()
+                next_idx = row_idx + 1
+                if next_idx < len(children):
+                    t.selection_set(children[next_idx])
+                    t.see(children[next_idx])
+                    win.after(80, lambda: start_inline_edit(next_idx))
+
+            def cancel_edit(event=None):
+                try:
+                    ent.destroy()
+                except: pass
+                editor['entry'] = None
+                t.focus_set()
+
+            ent.bind('<Return>', finish_and_advance)
+            ent.bind('<KP_Enter>', finish_and_advance)
+            ent.bind('<Tab>', finish_and_advance)
+            ent.bind('<Escape>', cancel_edit)
+
+        def keyboard_edit(event=None):
+            sel = t.selection()
+            if not sel:
+                children = t.get_children()
+                if not children:
+                    return
+                t.selection_set(children[0])
+                sel = t.selection()
+            iid = sel[0]
+            row_idx = t.index(iid)
+            start_inline_edit(row_idx)
+
+        def move_selection(delta):
+            children = t.get_children()
+            if not children:
+                return
+            sel = t.selection()
+            idx = t.index(sel[0]) if sel else 0
+            new_idx = max(0, min(len(children) - 1, idx + delta))
+            t.selection_set(children[new_idx])
+            t.see(children[new_idx])
+
+        t.bind('<Return>', keyboard_edit)
+        t.bind('<KP_Enter>', keyboard_edit)
+        t.bind('<F2>', keyboard_edit)
+        t.bind('<Double-1>', lambda e: keyboard_edit(e))
+        t.bind('<Up>', lambda e: move_selection(-1))
+        t.bind('<Down>', lambda e: move_selection(1))
+
+        btn_frame = tk.Frame(frame, bg="white"); btn_frame.pack(fill="x", pady=10)
+
+        def book_and_preview():
+            # update transaction to BOOKED
+            for r in all_t:
+                if r.get('ReqID') == req_id:
+                    r['Status'] = 'BOOKED'
+                    r['Items'] = str(items)
+                    r['TotalValue'] = str(sum(float(it.get('IssuedTotal',0) or 0) for it in items))
+                    break
+            try:
+                with open(TRANS_FILE, 'w', newline='', encoding='utf-8') as f:
+                    dw = csv.DictWriter(f, fieldnames=all_t[0].keys()); dw.writeheader(); dw.writerows(all_t)
+            except Exception as e:
+                messagebox.showerror("Error", f"Unable to update transaction: {e}")
+                return
+
+            # deduct issued qty from inventory
+            self.load_data()
+            inv_changed = False
+            for it in items:
+                code = str(it.get('Code') or it.get('Product code') or '').strip()
+                issued_qty = float(it.get('Issued', 0) or 0)
+                if not code or issued_qty == 0: continue
+                for row in self.inventory:
+                    if str(row.get('Product code','')).strip() == code:
+                        cur_stock = self.safe_float(row.get('Stock On Hand', 0))
+                        new_stock = max(0, cur_stock - issued_qty)
+                        row['Stock On Hand'] = f"{new_stock:.2f}"
+                        uc = self.safe_float(row.get('Unit cost', 0))
+                        row['Total Value'] = f"{new_stock * uc:.2f}"
+                        inv_changed = True
+                        break
+            if inv_changed:
+                try: self.save_to_db()
+                except Exception as e: messagebox.showwarning("Warning", f"Booked but failed to update inventory: {e}")
+
+            # prepare printable items (Qty = Issued)
+            printable_items = []
+            for it in items:
+                printable_items.append({
+                    'Code': it.get('Code',''),
+                    'Desc': it.get('Desc',''),
+                    'Cost': it.get('Cost', 0),
+                    'Qty': it.get('Issued', 0),
+                    'Total': it.get('IssuedTotal', 0)
+                })
+            total_val = sum(float(pi.get('Total',0) or 0) for pi in printable_items)
+            try: win.destroy()
+            except: pass
+            self.show_transaction_print({'ReqID': req_id, 'Date': req.get('Date',''), 'Outlet': req.get('Outlet',''), 'TotalValue': total_val, 'Items': str(printable_items), 'Status': 'BOOKED'})
+            try: self.build_store_dashboard()
+            except: pass
+
+        tk.Button(btn_frame, text="EDIT QTY", bg="#1976D2", fg="white", width=12, command=keyboard_edit).pack(side="left", padx=6)
+        tk.Button(btn_frame, text="SAVE", bg="#455A64", fg="white", width=10, command=lambda: save_changes(silent=False)).pack(side="left", padx=6)
+        tk.Button(btn_frame, text="BOOK & PREVIEW", bg=THEME["ON"], fg="white", width=16, command=book_and_preview).pack(side="left", padx=6)
+        tk.Button(btn_frame, text="CANCEL", bg="#777", fg="white", width=12, command=lambda: (win.destroy(), self.build_store_dashboard())).pack(side="right", padx=6)
+# ...existing code...    
+# ...existing code...
+    def store_review(self, req_id):
+        # Modal for storekeeper to enter physically issued quantities with keyboard-only inline editing
+        try:
+            with open(TRANS_FILE, 'r', encoding='utf-8') as f:
+                all_t = list(csv.DictReader(f))
+        except Exception:
+            messagebox.showerror("Error", "Unable to read transactions file.")
+            return
+        req = next((r for r in all_t if r.get('ReqID') == req_id), None)
+        if not req:
+            messagebox.showerror("Error", "Request not found.")
+            return
+
+        try:
+            items = ast.literal_eval(req.get('Items', '[]'))
+        except Exception:
+            items = []
+
+        # normalize items and ensure Issued fields
+        for it in items:
+            try: it['Qty'] = float(it.get('Qty', 0) or 0)
+            except: it['Qty'] = 0.0
+            try: it['Cost'] = float(it.get('Cost', 0) or 0)
+            except: it['Cost'] = 0.0
+            try: it['Issued'] = float(it.get('Issued', 0) or 0)
+            except: it['Issued'] = 0.0
+            it['IssuedTotal'] = round(it['Issued'] * it['Cost'], 2)
+
+        win = tk.Toplevel(self.root); win.state('zoomed'); win.configure(bg="#EEE"); win.title(f"Issue Items - {req_id}")
+        frame = tk.Frame(win, bg="white", padx=20, pady=20); frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        tk.Label(frame, text=f"ISSUE FOR REQ: {req_id} | {req.get('Outlet','')} | {req.get('Date','')}", bg="white", font=("Arial", 14, "bold")).pack(anchor="w")
+
+        cols = ('Code', 'Desc', 'ReqQty', 'Issued', 'Cost', 'IssuedTotal')
+        t = ttk.Treeview(frame, columns=cols, show='headings', height=18)
+        for col, w in (('Code',100), ('Desc',420), ('ReqQty',100), ('Issued',100), ('Cost',120), ('IssuedTotal',120)):
+            anchor = 'w' if col in ('Code','Desc') else 'e'
+            t.heading(col, text=col); t.column(col, width=w, anchor=anchor)
+        t.pack(fill="both", expand=True, pady=10)
+
+        total_lbl = tk.Label(frame, text="ISSUED TOTAL: LKR 0.00", bg="white", font=("Arial", 14, "bold"))
+        total_lbl.pack(anchor="e", pady=(6,0))
+
+        def refresh_items_view():
+            for ch in t.get_children(): t.delete(ch)
+            for it in items:
+                code = it.get('Code') or it.get('Product code') or ''
+                desc = it.get('Desc') or it.get('Product Description') or ''
+                reqq = float(it.get('Qty', 0) or 0)
+                cost = float(it.get('Cost', 0) or 0)
+                issued = float(it.get('Issued', 0) or 0)
+                it['IssuedTotal'] = round(issued * cost, 2)
+                t.insert('', 'end', values=(code, desc, f"{reqq:.2f}", f"{issued:.2f}", f"{cost:,.2f}", f"{it['IssuedTotal']:,.2f}"))
+            update_total_lbl()
+
+        def update_total_lbl():
+            total = sum(float(it.get('IssuedTotal', 0) or 0) for it in items)
+            total_lbl.config(text=f"ISSUED TOTAL: LKR {total:,.2f}")
+
+        refresh_items_view()
+
+        editor = {'entry': None}
+
+        def start_inline_edit(row_idx):
+            # place Entry over the 'Issued' cell for given row index and focus it
+            iid = t.get_children()[row_idx]
+            col_index = cols.index('Issued')  # 3
+            bbox = t.bbox(iid, f"#{col_index+1}")
+            if not bbox:
+                return
+            # create entry inside tree widget coordinates
+            if editor['entry']:
+                try: editor['entry'].destroy()
+                except: pass
+            ent = tk.Entry(t, justify='center')
+            ent_val = items[row_idx].get('Issued', 0)
+            ent.insert(0, f"{float(ent_val):.2f}")
+            ent.place(x=bbox[0], y=bbox[1], width=bbox[2], height=bbox[3])
+            ent.focus_set()
+            editor['entry'] = ent
+
+            def finish_and_advance(event=None):
+                val = ent.get().strip()
+                try:
+                    newf = float(val)
+                except:
+                    newf = 0.0
+                items[row_idx]['Issued'] = newf if newf > 0 else 0.0
+                items[row_idx]['IssuedTotal'] = round(items[row_idx]['Issued'] * float(items[row_idx].get('Cost', 0) or 0), 2)
+                try:
+                    ent.destroy()
+                except: pass
+                editor['entry'] = None
+                refresh_items_view()
+                self.save_changes(all_t, req_id, items, silent=True)
+                # auto-advance to next row if exists
+                children = t.get_children()
+                next_idx = row_idx + 1
+                if next_idx < len(children):
+                    t.selection_set(children[next_idx])
+                    t.see(children[next_idx])
+                    # slight delay to let UI update
+                    win.after(80, lambda: start_inline_edit(next_idx))
+
+            def cancel_edit(event=None):
+                try:
+                    ent.destroy()
+                except: pass
+                editor['entry'] = None
+                t.focus_set()
+
+            # bind keys
+            ent.bind('<Return>', finish_and_advance)
+            ent.bind('<KP_Enter>', finish_and_advance)
+            ent.bind('<Tab>', finish_and_advance)
+            ent.bind('<Escape>', cancel_edit)
+
+        def keyboard_edit(event=None):
+            # invoked by Return / F2 on tree: start inline edit on selected row
+            sel = t.selection()
+            if not sel:
+                # if nothing selected, select first row
+                children = t.get_children()
+                if not children: return
+                t.selection_set(children[0])
+                sel = t.selection()
+            iid = sel[0]
+            row_idx = t.index(iid)
+            start_inline_edit(row_idx)
+
+        def move_selection(delta):
+            children = t.get_children()
+            if not children:
+                return
+            sel = t.selection()
+            idx = t.index(sel[0]) if sel else 0
+            new_idx = max(0, min(len(children) - 1, idx + delta))
+            t.selection_set(children[new_idx])
+            t.see(children[new_idx])
+
+        # only keyboard triggers required; double-click optional but kept
+        t.bind('<Return>', keyboard_edit)
+        t.bind('<KP_Enter>', keyboard_edit)
+        t.bind('<F2>', keyboard_edit)
+        # keep mouse double-click optional
+        t.bind('<Double-1>', lambda e: keyboard_edit(e))
+        t.bind('<Up>', lambda e: move_selection(-1))
+        t.bind('<Down>', lambda e: move_selection(1))
+
+        btn_frame = tk.Frame(frame, bg="white"); btn_frame.pack(fill="x", pady=10)
+
+        def book_and_preview():
+            for r in all_t:
+                if r.get('ReqID') == req_id:
+                    r['Status'] = 'BOOKED'
+                    r['Items'] = str(items)
+                    r['TotalValue'] = str(sum(float(it.get('IssuedTotal',0) or 0) for it in items))
+                    break
+            try:
+                with open(TRANS_FILE, 'w', newline='', encoding='utf-8') as f:
+                    dw = csv.DictWriter(f, fieldnames=all_t[0].keys()); dw.writeheader(); dw.writerows(all_t)
+            except Exception as e:
+                messagebox.showerror("Error", f"Unable to update transaction: {e}")
+                return
+
+            # update inventory
+            self.load_data()
+            inv_changed = False
+            for it in items:
+                code = str(it.get('Code') or it.get('Product code') or '').strip()
+                issued_qty = float(it.get('Issued', 0) or 0)
+                if not code or issued_qty == 0: continue
+                for row in self.inventory:
+                    if str(row.get('Product code','')).strip() == code:
+                        cur_stock = self.safe_float(row.get('Stock On Hand', 0))
+                        new_stock = max(0, cur_stock - issued_qty)
+                        row['Stock On Hand'] = f"{new_stock:.2f}"
+                        uc = self.safe_float(row.get('Unit cost', 0))
+                        row['Total Value'] = f"{new_stock * uc:.2f}"
+                        inv_changed = True
+                        break
+            if inv_changed:
+                try: self.save_to_db()
+                except Exception as e: messagebox.showwarning("Warning", f"Booked but failed to update inventory: {e}")
+
+            printable_items = []
+            for it in items:
+                printable_items.append({
+                    'Code': it.get('Code',''),
+                    'Desc': it.get('Desc',''),
+                    'Cost': it.get('Cost', 0),
+                    'Qty': it.get('Issued', 0),
+                    'Total': it.get('IssuedTotal', 0)
+                })
+            total_val = sum(float(pi.get('Total',0) or 0) for pi in printable_items)
+            try: win.destroy()
+            except: pass
+            self.show_transaction_print({'ReqID': req_id, 'Date': req.get('Date',''), 'Outlet': req.get('Outlet',''), 'TotalValue': total_val, 'Items': str(printable_items), 'Status': 'BOOKED'})
+            try: self.build_store_dashboard()
+            except: pass
+
+        tk.Button(btn_frame, text="EDIT QTY", bg="#1976D2", fg="white", width=12, command=keyboard_edit).pack(side="left", padx=6)
+        tk.Button(btn_frame, text="SAVE", bg="#455A64", fg="white", width=10, command=lambda: save_changes(silent=False)).pack(side="left", padx=6)
+        tk.Button(btn_frame, text="BOOK & PREVIEW", bg=THEME["ON"], fg="white", width=16, command=book_and_preview).pack(side="left", padx=6)
+        tk.Button(btn_frame, text="CANCEL", bg="#777", fg="white", width=12, command=lambda: (win.destroy(), self.build_store_dashboard())).pack(side="right", padx=6)
+# ...existing code...
+# filepath: c:\Users\My plus computers\Desktop\Marriott _Sys\import tkcalendar.py
+# ...existing code...
+    def store_review(self, req_id):
+        # Modal for storekeeper to enter physically issued quantities with keyboard-only inline editing
+        try:
+            with open(TRANS_FILE, 'r', encoding='utf-8') as f:
+                all_t = list(csv.DictReader(f))
+        except Exception:
+            messagebox.showerror("Error", "Unable to read transactions file.")
+            return
+        req = next((r for r in all_t if r.get('ReqID') == req_id), None)
+        if not req:
+            messagebox.showerror("Error", "Request not found.")
+            return
+
+        try:
+            items = ast.literal_eval(req.get('Items', '[]'))
+        except Exception:
+            items = []
+
+        # normalize items and ensure Issued fields
+        for it in items:
+            try: it['Qty'] = float(it.get('Qty', 0) or 0)
+            except: it['Qty'] = 0.0
+            try: it['Cost'] = float(it.get('Cost', 0) or 0)
+            except: it['Cost'] = 0.0
+            try: it['Issued'] = float(it.get('Issued', 0) or 0)
+            except: it['Issued'] = 0.0
+            it['IssuedTotal'] = round(it['Issued'] * it['Cost'], 2)
+
+        win = tk.Toplevel(self.root); win.state('zoomed'); win.configure(bg="#EEE"); win.title(f"Issue Items - {req_id}")
+        frame = tk.Frame(win, bg="white", padx=20, pady=20); frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        tk.Label(frame, text=f"ISSUE FOR REQ: {req_id} | {req.get('Outlet','')} | {req.get('Date','')}", bg="white", font=("Arial", 14, "bold")).pack(anchor="w")
+
+        cols = ('Code', 'Desc', 'ReqQty', 'Issued', 'Cost', 'IssuedTotal')
+        t = ttk.Treeview(frame, columns=cols, show='headings', height=18)
+        for col, w in (('Code',100), ('Desc',420), ('ReqQty',100), ('Issued',100), ('Cost',120), ('IssuedTotal',120)):
+            anchor = 'w' if col in ('Code','Desc') else 'e'
+            t.heading(col, text=col); t.column(col, width=w, anchor=anchor)
+        t.pack(fill="both", expand=True, pady=10)
+
+        total_lbl = tk.Label(frame, text="ISSUED TOTAL: LKR 0.00", bg="white", font=("Arial", 14, "bold"))
+        total_lbl.pack(anchor="e", pady=(6,0))
+
+        def refresh_items_view():
+            for ch in t.get_children(): t.delete(ch)
+            for it in items:
+                code = it.get('Code') or it.get('Product code') or ''
+                desc = it.get('Desc') or it.get('Product Description') or ''
+                reqq = float(it.get('Qty', 0) or 0)
+                cost = float(it.get('Cost', 0) or 0)
+                issued = float(it.get('Issued', 0) or 0)
+                it['IssuedTotal'] = round(issued * cost, 2)
+                t.insert('', 'end', values=(code, desc, f"{reqq:.2f}", f"{issued:.2f}", f"{cost:,.2f}", f"{it['IssuedTotal']:,.2f}"))
+            update_total_lbl()
+
+        def update_total_lbl():
+            total = sum(float(it.get('IssuedTotal', 0) or 0) for it in items)
+            total_lbl.config(text=f"ISSUED TOTAL: LKR {total:,.2f}")
+
+        refresh_items_view()
+
+        editor = {'entry': None}
+
+        def start_inline_edit(row_idx):
+            # place Entry over the 'Issued' cell for given row index and focus it
+            iid = t.get_children()[row_idx]
+            col_index = cols.index('Issued')  # 3
+            bbox = t.bbox(iid, f"#{col_index+1}")
+            if not bbox:
+                return
+            # create entry inside tree widget coordinates
+            if editor['entry']:
+                try: editor['entry'].destroy()
+                except: pass
+            ent = tk.Entry(t, justify='center')
+            ent_val = items[row_idx].get('Issued', 0)
+            ent.insert(0, f"{float(ent_val):.2f}")
+            ent.place(x=bbox[0], y=bbox[1], width=bbox[2], height=bbox[3])
+            ent.focus_set()
+            editor['entry'] = ent
+
+            def finish_and_advance(event=None):
+                val = ent.get().strip()
+                try:
+                    newf = float(val)
+                except:
+                    newf = 0.0
+                items[row_idx]['Issued'] = newf if newf > 0 else 0.0
+                items[row_idx]['IssuedTotal'] = round(items[row_idx]['Issued'] * float(items[row_idx].get('Cost', 0) or 0), 2)
+                try:
+                    ent.destroy()
+                except: pass
+                editor['entry'] = None
+                refresh_items_view()
+                # auto-advance to next row if exists
+                children = t.get_children()
+                next_idx = row_idx + 1
+                if next_idx < len(children):
+                    t.selection_set(children[next_idx])
+                    t.see(children[next_idx])
+                    # slight delay to let UI update
+                    win.after(80, lambda: start_inline_edit(next_idx))
+
+            def cancel_edit(event=None):
+                try:
+                    ent.destroy()
+                except: pass
+                editor['entry'] = None
+                t.focus_set()
+
+            # bind keys
+            ent.bind('<Return>', finish_and_advance)
+            ent.bind('<KP_Enter>', finish_and_advance)
+            ent.bind('<Tab>', finish_and_advance)
+            ent.bind('<Escape>', cancel_edit)
+
+        def keyboard_edit(event=None):
+            # invoked by Return / F2 on tree: start inline edit on selected row
+            sel = t.selection()
+            if not sel:
+                # if nothing selected, select first row
+                children = t.get_children()
+                if not children: return
+                t.selection_set(children[0])
+                sel = t.selection()
+            iid = sel[0]
+            row_idx = t.index(iid)
+            start_inline_edit(row_idx)
+
+        # only keyboard triggers required; double-click optional but kept
+        t.bind('<Return>', keyboard_edit)
+        t.bind('<KP_Enter>', keyboard_edit)
+        t.bind('<F2>', keyboard_edit)
+        # keep mouse double-click optional
+        t.bind('<Double-1>', lambda e: keyboard_edit(e))
+
+        btn_frame = tk.Frame(frame, bg="white"); btn_frame.pack(fill="x", pady=10)
+
+        def save_changes():
+            for r in all_t:
+                if r.get('ReqID') == req_id:
+                    r['Items'] = str(items)
+                    r['TotalValue'] = str(sum(float(it.get('IssuedTotal',0) or 0) for it in items))
+                    break
+            try:
+                with open(TRANS_FILE, 'w', newline='', encoding='utf-8') as f:
+                    dw = csv.DictWriter(f, fieldnames=all_t[0].keys()); dw.writeheader(); dw.writerows(all_t)
+                messagebox.showinfo("Saved", "Issued quantities saved.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Unable to save: {e}")
+
+        def book_and_print():
+            for r in all_t:
+                if r.get('ReqID') == req_id:
+                    r['Status'] = 'BOOKED'
+                    r['Items'] = str(items)
+                    r['TotalValue'] = str(sum(float(it.get('IssuedTotal',0) or 0) for it in items))
+                    break
+            try:
+                with open(TRANS_FILE, 'w', newline='', encoding='utf-8') as f:
+                    dw = csv.DictWriter(f, fieldnames=all_t[0].keys()); dw.writeheader(); dw.writerows(all_t)
+            except Exception as e:
+                messagebox.showerror("Error", f"Unable to update transaction: {e}")
+                return
+
+            # update inventory
+            self.load_data()
+            inv_changed = False
+            for it in items:
+                code = str(it.get('Code') or it.get('Product code') or '').strip()
+                issued_qty = float(it.get('Issued', 0) or 0)
+                if not code or issued_qty == 0: continue
+                for row in self.inventory:
+                    if str(row.get('Product code','')).strip() == code:
+                        cur_stock = self.safe_float(row.get('Stock On Hand', 0))
+                        new_stock = max(0, cur_stock - issued_qty)
+                        row['Stock On Hand'] = f"{new_stock:.2f}"
+                        uc = self.safe_float(row.get('Unit cost', 0))
+                        row['Total Value'] = f"{new_stock * uc:.2f}"
+                        inv_changed = True
+                        break
+            if inv_changed:
+                try: self.save_to_db()
+                except Exception as e: messagebox.showwarning("Warning", f"Booked but failed to update inventory: {e}")
+
+            printable_items = []
+            for it in items:
+                printable_items.append({
+                    'Code': it.get('Code',''),
+                    'Desc': it.get('Desc',''),
+                    'Cost': it.get('Cost', 0),
+                    'Qty': it.get('Issued', 0),
+                    'Total': it.get('IssuedTotal', 0)
+                })
+            total_val = sum(float(pi.get('Total',0) or 0) for pi in printable_items)
+            try: win.destroy()
+            except: pass
+            self.show_transaction_print({'ReqID': req_id, 'Date': req.get('Date',''), 'Outlet': req.get('Outlet',''), 'TotalValue': total_val, 'Items': str(printable_items), 'Status': 'BOOKED'})
+            try: self.build_store_dashboard()
+            except: pass
+
+        tk.Button(btn_frame, text="SAVE", bg="#1976D2", fg="white", width=12, command=save_changes).pack(side="left", padx=6)
+        tk.Button(btn_frame, text="BOOK & PRINT", bg=THEME["ON"], fg="white", width=16, command=book_and_print).pack(side="left", padx=6)
+        tk.Button(btn_frame, text="CANCEL", bg="#777", fg="white", width=12, command=lambda: (win.destroy(), self.build_store_dashboard())).pack(side="right", padx=6)
+# ...existing code...
